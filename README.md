@@ -1,193 +1,190 @@
 # aicli
 
-One command every script reaches `claude` (Claude Code) and `agy`
-(Antigravity) through. Binary paths, model tiers, standard flags, workload
-routing and `/usage` parsing live in one config file instead of being copied
-into every project.
+**A proxy for AI coding CLIs.** Point your scripts, cron jobs and services at
+`aicli`, and it runs them through the AI CLI subscriptions you already pay for
+(Claude Code, Antigravity, more to come), routed and logged from one place.
 
-aicli only builds an argv and runs the real, unmodified CLI under your own
-login. It never reads, stores or forwards OAuth tokens
-(`~/.claude/.credentials.json`, `~/.gemini/`), and it never calls a vendor
-backend itself.
+## Why
 
-It has two halves:
+- **Subscriptions are far cheaper than APIs.** A flat monthly plan for a
+  coding CLI covers an amount of work that would cost many times more at
+  per-token API prices. If you already pay for one, your own automation
+  should use it too.
+- **Nothing lets you use several and switch between them.** Each CLI has its
+  own flags, model names and quota. Every script ends up hardcoding one of
+  them, and moving a job from one provider to another means editing every
+  caller.
 
-- `aicli.py`, the `aicli` command. Callers exec it instead of `claude`/`agy`:
-  `aicli run --client <repo>:<use> --class <workload-class> -- <args...>`.
-- `server.py`, an optional HTTP service (`aicli-ai`) that fronts the same argv
-  builder with an OpenAI-compatible `/v1/chat/completions` endpoint, for
-  callers that want text in, text out.
+aicli fixes both. Callers say *what kind of work* they're doing (a workload
+class like `lightweight-task` or `deep-spec`). aicli decides *which CLI and
+model* runs it, from one config file you can change live, and keeps one log
+of who used what.
 
-Python 3.11+ standard library only. No dependencies.
+## How it works
+
+```
+your script ──> aicli run --client myrepo:summarize --class lightweight-task -- -p "..."
+                  │
+                  ├─ looks up the class in routes.json   -> agy, tier "low"
+                  ├─ builds the real argv               -> agy --model gemini-3.8-flash-low -p "..."
+                  ├─ appends one line to the usage log
+                  └─ execs the unmodified CLI under your own login
+```
+
+aicli never reads, stores or forwards your OAuth tokens, and never calls a
+vendor backend itself. It only builds a command line and runs the official
+CLI, exactly as you would by hand. Exit code, stdin/stdout, signals and TTY
+are the real CLI's.
+
+For callers that want text in, text out, an optional HTTP service
+(`server.py`) puts the same routing behind an **OpenAI-compatible
+`/v1/chat/completions`** endpoint.
+
+## Backends
+
+| Backend | CLI | Status |
+|---|---|---|
+| Claude Code | `claude` | supported |
+| Antigravity | `agy` | supported |
+| Others (Codex, Gemini CLI, ...) | | planned |
+
+Each backend is a table in `aicli.toml`: its binary, model flag, effort flag
+and three model tiers (`low`, `default`, `deep`).
 
 ## Quick start
 
-```
+Needs Python 3.11+ and nothing else (standard library only).
+
+```sh
 git clone https://github.com/zakaria1193/aicli ~/my_repos/aicli
 cd ~/my_repos/aicli
-make install   # links ~/.local/bin/aicli -> aicli.py
-make test      # unit tests against a fake CLI, never the real one
-aicli resolve --class standard-dev
-aicli run --client myrepo:summarize --class lightweight-task -- -p "hello"
+make install    # links ~/.local/bin/aicli -> aicli.py
+make test       # unit tests against a fake CLI; never spends real quota
+
+aicli resolve --class standard-dev                 # where would this go?
+aicli run --client demo --class lightweight-task -- -p "say hi"
 ```
+
+## Concepts
+
+**Workload classes** describe the job, not the tool. The defaults:
+
+| Class | For |
+|---|---|
+| `lightweight-task` | extraction, scraping, tagging; high volume |
+| `maintenance` | background fixes, dependency bumps, CI repairs |
+| `managerial-audit` | scheduled reports, watchdogs, audits |
+| `standard-dev` | everyday code changes |
+| `deep-spec` | architecture, long specs, deep reviews |
+| `interactive-shell` | a human at a terminal |
+
+**Clients** name the caller, like `myrepo:summarize`. A client can override
+its class's route, and a longer name also matches a shorter one
+(`pjm:p-0001:auto-execute` falls back to `pjm:auto-execute`).
+
+**Routing order:** an explicit `--tool`, `--tier` or `--effort` wins, then the
+client's own route, then its class. Without a class or a `--tool`, aicli
+exits 2.
 
 ## Config
 
-aicli reads the first of these that exists:
+aicli reads the first config that exists:
 
-1. `$AICLI_CONFIG` (tests use it),
-2. `~/.config/aicli/aicli.toml`, where a deployment links its own config,
-3. `aicli.toml` in this repo, the defaults.
+1. `$AICLI_CONFIG`
+2. `~/.config/aicli/aicli.toml`
+3. `aicli.toml` in this repo (the defaults)
 
-`aicli.toml` holds, per tool, `bin`, standard `args`, `model_flag`,
-`effort_flag` and a `low`/`default`/`deep` tier table, plus the default
-workload classes (`[classes.*]`).
-
-`routes.json` is the live switchboard layered over those classes: client
-overrides, class changes and an `optiplex_projects` list. It sits next to the
-config file unless `AICLI_ROUTES` or the config's `routes_file` says
-otherwise. `aicli route ...` edits it, and so can a UI such as homelab's
-cockpit. A save writes through a symlink to the real file, so a deployment
-can keep `~/.config/aicli/routes.json` as a link into its own repo.
-
-## Files
-
-- `aicli.py` - the `aicli` command: `which`, `argv`, `run`, `resolve`,
-  `usage`, `routes`, `route`.
-- `aicli.toml` - the default config.
-- `server.py` - the `aicli-ai` HTTP service: `/healthz`, `/v1/models`,
-  `/v1/chat/completions`.
-- `.env.example` - the service's settings (`AICLI_HOST`, `AICLI_PORT`,
-  `AICLI_MAX_CONCURRENT`, `AICLI_TIMEOUT`, `AICLI_USAGE_LOG`, ...).
-- `tests/` - unit tests and the fake CLI they run against
-  (`tests/fake_cli/`). No test runs the real `claude` or `agy`.
+`aicli.toml` holds the backends and the default classes. `routes.json`,
+next to it (or at `$AICLI_ROUTES`), holds live overrides: class changes and
+client routes. Edit it with `aicli route ...` or from a UI; saves go through
+a symlink to the real file, so a deployment can keep its routes in its own
+repo.
 
 ## Commands
 
-```
-aicli which <claude|agy>
-```
-Prints the absolute path of the real binary: the configured `bin` if it's
-executable, otherwise the first match on `PATH` (skipping `/usr/local/bin`
-and `/usr/local/sbin`, where the tmux wrapper's symlinks live, to avoid a
-loop). Exits 1 with `<tool> CLI not found` if neither resolves.
+| Command | Does |
+|---|---|
+| `aicli run [opts] [--meta-out FILE] -- ARGS` | Route, log, then exec the real CLI |
+| `aicli argv [opts] [--json] -- ARGS` | Print the command `run` would exec (for tmux, systemd) |
+| `aicli resolve [opts] [--quota] [--json]` | Print where a call would go, without running it |
+| `aicli which <tool>` | Print the real binary's path |
+| `aicli usage [--json]` | Each subscription's quota bars, from the CLI's `/usage` |
+| `aicli routes [--json]` | Show the routing table |
+| `aicli route set-class NAME --tool T [--tier ...]` | Change a class's route |
+| `aicli route set-client ID [--class C] [--tool T] [--tier ...]` | Route one client |
+| `aicli route remove-client ID` | Drop a client's route |
 
-```
-aicli argv [--tool <claude|agy>] [--tier low|default|deep] [--effort low|medium|high]
-           [--client <id>] [--class <name>] [--json] [-- args...]
-```
-Prints the argv that `run` would exec: one shell-quoted line by default, or a
-JSON array with `--json`. For callers that launch the CLI themselves (tmux,
-systemd). `--tier` defaults to `default`. If `args` already holds the model
-or effort flag, aicli does not add its own. A tool with
-`model_sets_effort = true` (agy: `gemini-3.8-flash-low` names its effort, and
-agy rejects a different `--effort`) gets no effort flag at all when aicli adds
-the tier's model; the tier decides.
+`opts` are `--client ID`, `--class NAME`, `--tool`, `--tier low|default|deep`
+and `--effort low|medium|high`.
 
-`--client` and `--class` pick the tool and tier from `routes.json` instead:
-a client's own row first (`pjm:p-0001:auto-execute` also matches
-`pjm:auto-execute`), then its class. An explicit `--tool`, `--tier` or
-`--effort` always wins. Without a class or a `--tool`, it exits 2.
+Details worth knowing:
 
-```
-aicli run [same options as argv] [--meta-out <path>] [-- args...]
-```
-Same options as `argv`, but `exec`s that argv - the exit code, signals,
-stdin/stdout and TTY are exactly the real CLI's. Before the exec it appends
-one line (client, class, tool, tier, model, quota) to `AICLI_USAGE_LOG`, and
-`--meta-out` writes the same facts as JSON to `<path>`. The model and effort
-are read back from the argv, so a caller's own `--model` is what gets
-recorded.
+- If your args already set the model or effort, aicli leaves them alone, and
+  the log records what really ran.
+- A backend with `model_sets_effort = true` (agy, whose model names include
+  the effort) gets no separate effort flag when aicli picks the model.
+- `which` skips `/usr/local/bin` and `/usr/local/sbin`, so a wrapper that
+  symlinks `claude` there can't make aicli call itself.
+- `usage` exits 0 even when a backend's state is `unknown`; the state is in
+  the output.
 
-```
-aicli resolve [--client <id>] [--class <name>] [--tool ...] [--tier ...] [--quota] [--json]
-```
-Prints where a call would go (class, tool, tier, model) without running it.
+## HTTP service
 
-```
-aicli routes [--json]
-aicli route set-class <name> --tool <claude|agy> [--tier ...]
-aicli route set-client <id> [--class <name>] [--tool ...] [--tier ...]
-aicli route remove-client <id>
-```
-Shows and edits `routes.json`.
+`python3 server.py` starts an OpenAI-compatible server on `127.0.0.1:8500`.
+Settings are environment variables; see `.env.example`.
 
-```
-aicli usage [--json]
-```
-Runs `claude -p /usage` and `agy -p /usage` side by side and parses them
-. Exits 0 even when a tool's
-state is `unknown`; the state is in the output. `--json` prints
-`{"claude": {state, detail, bars}, "agy": {...}}`.
+| Endpoint | |
+|---|---|
+| `GET /healthz` | `200 ok`, runs nothing |
+| `GET /v1/models` | `claude`, `agy`, and `<tool>/<tier>` for every tier |
+| `POST /v1/chat/completions` | Runs the CLI once; `stream` and `reasoning_effort` supported |
 
-## The service (`aicli-ai`)
+- Each request runs in an empty scratch folder with no permission-skipping
+  flag. At most `AICLI_MAX_CONCURRENT` runs at once; the rest queue.
+- Errors: 400 bad request or unknown model, 413 prompt over 120 KiB, 502 the
+  CLI failed, 504 timeout.
+- **Loopback only by default.** Binding elsewhere needs both
+  `AICLI_ALLOW_NON_LOOPBACK=1` and `AICLI_API_KEY`, and remote callers must
+  send `Authorization: Bearer <key>`.
 
-An HTTP service on port 8500 speaking the OpenAI chat-completions protocol,
-for text callers that can't exec the CLI themselves (ai-job-search, or a
-container through the docker bridge). It binds `127.0.0.1` by default. A
-non-loopback `AICLI_HOST` needs both `AICLI_ALLOW_NON_LOOPBACK=1` and
-`AICLI_API_KEY`, or `server.py` refuses to start. Loopback callers need no
-key; any other caller must send `Authorization: Bearer <AICLI_API_KEY>` on
-`/v1/*` or gets a 401 (`/healthz` stays open).
+This repo ships no systemd unit; run it under whatever supervisor your host
+uses.
 
-- `GET /healthz` - `200 ok`, no CLI run.
-- `GET /v1/models` - the ids `claude`, `agy` and `<tool>/<tier>` for every
-  tier (8 ids). A bare tool id means its `default` tier.
-- `POST /v1/chat/completions` - `model` one of those ids, `messages`
-  flattened into one prompt, `reasoning_effort` maps to `--effort`,
-  `stream: true|false`. Each request runs the CLI once through the same
-  argv builder as `aicli run`, in an empty scratch directory, with no
-  permission-skipping flag. At most `AICLI_MAX_CONCURRENT` runs happen at
-  once; more wait their turn. Errors: 400 (bad request/unknown model), 413
-  (prompt over 120 KiB), 502 (non-zero CLI exit), 504 (timeout).
+## Usage log
 
-### Token usage log
+Every `aicli run` and every HTTP request appends a JSON line to
+`$AICLI_USAGE_LOG` (default `~/.local/state/aicli/usage.jsonl`): when, client,
+class, backend, tier, model, and for HTTP requests the token counts the CLI
+reported.
 
-Every chat-completions request appends one JSON line per model to
-`AICLI_USAGE_LOG` (default `~/.local/state/aicli/usage.jsonl`). `aicli run`
-writes to the same file, with its own row shape (client, class, quota, no
-token counts):
-
-```
-{"at": "2026-10-14T18:20:00+00:00", "tool": "claude", "tier": "default", "stream": false,
- "model": "claude-sonnet-5", "reported": true, "client": "pjm",
+```json
+{"at": "2026-10-14T18:20:00+00:00", "tool": "claude", "tier": "default",
+ "model": "claude-sonnet-5", "client": "pjm", "reported": true,
  "input": 3, "output": 7, "cache_write": 20, "cache_read": 100, "total": 130}
 ```
 
-The counts come from the CLI's own final result: claude's `modelUsage` (one
-line per model it used), agy's `usage` (often only a `total`). Non-streaming
-claude runs use `--output-format json` so their counts can be read; agy without
-streaming prints plain text, so its line says `"reported": false`. Failed runs
-are logged too. A log that can't be written never fails the request. pjm's
-Usage page and homelab's cockpit both read this file.
+The HTTP client name comes from the `X-Aicli-Client` header, else the OpenAI
+`user` field, else `AICLI_REMOTE_CLIENT` for remote callers, else `unknown`.
+A log that can't be written never fails a request.
 
-Every HTTP line also carries `client`: who made the request, for this log
-only - it is never used for routing or auth. It is chosen in order: the
-`X-Aicli-Client` request header, else the OpenAI `user` field of the request
-body, else - for a non-loopback caller that passed the API key check -
-the `AICLI_REMOTE_CLIENT` setting, else `"unknown"`. The name is trimmed,
-stripped of control characters and cut to 80 characters. For example
-`AICLI_REMOTE_CLIENT=karakeep:tagger` labels the calls of a client that sends
-neither the header nor the `user` field.
+## Fair use
 
-## Running the service
+aicli runs the official, unmodified CLIs under **your own** login, for
+**your own** tools. That is what the subscriptions are for. Don't put it
+behind a public or multi-user app, and don't use it to share one plan
+between people: that breaks the providers' terms and puts your account at
+risk.
 
-This repo does not install a systemd unit. Run `python3 server.py` with the
-settings from `.env.example` in its environment, under whatever supervisor
-the host uses. On Zak's OptiPlex the unit and its `.env` live in homelab
-(`services/AI/aicliAI`), which runs `server.py` from a checkout of this repo
-at `~/my_repos/aicli` and links its config into `~/.config/aicli/`.
+## Files
 
-## Who uses it
-
-Each caller names itself with `--client` so the usage log and routes can tell
-them apart: pjm (ticket runs, maintainers, scrum master), homelab (cockpit
-quota bars, the tmux wrapper, auto-heal), social-helper, ai-job-search, and
-karakeep through the HTTP service.
-
-aicli is for private tools and automation that run under your own login and
-quota. Don't put it behind a public, user-facing app.
+```
+aicli.py       the aicli command
+server.py      the optional OpenAI-compatible HTTP service
+aicli.toml     default config: backends, tiers, workload classes
+.env.example   the service's settings
+tests/         unit tests and the fake CLIs they run against
+```
 
 ## License
 
-MIT, see `LICENSE`.
+MIT, see [LICENSE](LICENSE).

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""aicli - the one place every script reaches `claude` and `agy` through.
+"""aicli - a proxy for AI coding CLIs (claude, agy, more to come).
 
 It only builds an argv and execs the real, unmodified CLI under the user's
 own login. It never reads, stores or forwards OAuth tokens, and it never
