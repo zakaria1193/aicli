@@ -1,5 +1,5 @@
 """Tests for server.py against the fake CLI in tests/fake_cli/. No test runs
-the real `claude` or `agy` - see homelab-0013 acceptance criteria 6 and 7."""
+the real `claude` or `agy` - see the README."""
 import json
 import os
 import sys

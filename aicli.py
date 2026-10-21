@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""aicli - the one place every homelab caller reaches `claude` and `agy`.
+"""aicli - the one place every script reaches `claude` and `agy` through.
 
 It only builds an argv and execs the real, unmodified CLI under the user's
 own login. It never reads, stores or forwards OAuth tokens, and it never
-calls a vendor backend itself. See ticket homelab-0013 for the why.
+calls a vendor backend itself.
 
-`AICLI_CONFIG` points this module at a different `aicli.toml` (tests use it).
+The config is `$AICLI_CONFIG`, else `~/.config/aicli/aicli.toml`, else the
+`aicli.toml` shipped next to this file (see default_config_path).
 """
 import argparse
 import json
@@ -24,7 +25,7 @@ TOOLS = ("claude", "agy")
 TIERS = ("low", "default", "deep")
 EFFORTS = ("low", "medium", "high")
 DEFAULT_USAGE_LOG = Path("~/.local/state/aicli/usage.jsonl").expanduser()
-# The tmux wrapper (tools/optiplex-ai-tmux.sh) symlinks `claude`/`agy` here, so
+# A tmux wrapper (homelab's tools/optiplex-ai-tmux.sh) symlinks `claude`/`agy` here, so
 # a PATH search that walked into them would just exec itself in a loop.
 SKIP_DIRS = {"/usr/local/bin", "/usr/local/sbin"}
 
@@ -32,7 +33,15 @@ UNKNOWN = "unknown"
 OK = "ok"
 
 
+USER_CONFIG = Path("~/.config/aicli/aicli.toml")
+
+
 def default_config_path():
+    # A deployment (homelab, say) links its own config to ~/.config/aicli/;
+    # without one, the aicli.toml shipped in this repo is the default.
+    user_config = USER_CONFIG.expanduser()
+    if user_config.is_file():
+        return user_config
     # __file__ is the symlink path when run via the ~/.local/bin/aicli link
     # `make install` creates, so resolve it before finding aicli.toml next to
     # the real aicli.py in this repo.
@@ -142,7 +151,7 @@ def default_routes_path(config=None):
 def load_routes(config=None, routes_path=None):
     routes_file = Path(routes_path) if routes_path else default_routes_path(config)
     # The [classes.*] tables in aicli.toml are the one source of the defaults;
-    # routes.json (the cockpit's switchboard) is layered over them.
+    # routes.json (the live switchboard, e.g. homelab's cockpit) is layered over them.
     classes = {}
     if config and isinstance(config.get("classes"), dict):
         for name, d in config["classes"].items():
@@ -173,6 +182,9 @@ def load_routes(config=None, routes_path=None):
 
 def save_routes(routes, config=None, routes_path=None):
     routes_file = Path(routes_path) if routes_path else default_routes_path(config)
+    # routes.json is often a link into the deployment's repo
+    # (~/.config/aicli/routes.json); write the real file, not over the link.
+    routes_file = routes_file.resolve()
     routes_file.parent.mkdir(parents=True, exist_ok=True)
     # A unique temp file: the cockpit saves from several threads of one
     # process, so a per-pid name would be shared between two saves.
@@ -376,7 +388,7 @@ def get_tool_quota(config, tool, timeout=3.0):
 
 def build_parser():
     parser = argparse.ArgumentParser(prog="aicli")
-    parser.add_argument("--config", help="path to aicli.toml (default: $AICLI_CONFIG or the repo one)")
+    parser.add_argument("--config", help="path to aicli.toml (default: $AICLI_CONFIG, ~/.config/aicli/aicli.toml, or the one in this repo)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_which = sub.add_parser("which")

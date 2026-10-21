@@ -1,5 +1,5 @@
 """Tests for aicli.py against the fake CLI in tests/fake_cli/. No test runs the
-real `claude` or `agy` - see homelab-0013 acceptance criterion 2."""
+real `claude` or `agy`."""
 import json
 import os
 import subprocess
@@ -510,6 +510,27 @@ class RoutingTests(unittest.TestCase):
             aicli.save_routes({"classes": {}, "clients": {"a": {}}}, routes_path=routes_path)
             self.assertEqual(json.loads(routes_path.read_text())["clients"], {"a": {}})
             self.assertEqual([p.name for p in Path(d).iterdir()], ["routes.json"])
+
+    def test_save_routes_through_a_link_writes_the_linked_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            real = Path(d) / "deploy" / "routes.json"
+            real.parent.mkdir()
+            real.write_text("{}\n")
+            link = Path(d) / "routes.json"
+            link.symlink_to(real)
+            aicli.save_routes({"classes": {}, "clients": {"a": {}}}, routes_path=link)
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(json.loads(real.read_text())["clients"], {"a": {}})
+
+    def test_default_config_prefers_the_user_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            user_config = Path(d) / "aicli.toml"
+            saved = aicli.USER_CONFIG
+            self.addCleanup(setattr, aicli, "USER_CONFIG", saved)
+            aicli.USER_CONFIG = user_config
+            self.assertEqual(aicli.default_config_path(), ROOT / "aicli.toml")
+            user_config.write_text("")
+            self.assertEqual(aicli.default_config_path(), user_config)
 
     def test_resolve_route_hierarchical_client_matching(self):
         with tempfile.TemporaryDirectory() as d:

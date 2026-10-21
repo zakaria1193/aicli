@@ -1,6 +1,7 @@
 # aicli's one config file. Everything a caller needs to know about the
 # `claude` and `agy` CLIs - binary paths, model tiers, standard flags - lives
-# here. See ../../../AGENTS.md and ticket homelab-0013 for the why.
+# here. This is the default; a deployment can put its own at
+# ~/.config/aicli/aicli.toml or point AICLI_CONFIG at it.
 
 usage_timeout = 30
 
@@ -31,8 +32,8 @@ deep = "gemini-3.8-flash-high"
 
 # --- Workload Classes & Routing ----------------------------------------------
 # Callers can pass `--class <name>` and optional `--client <id>` instead of
-# hardcoding tools and models. The default routing here can be customized
-# live from the Cockpit UI (/ai-routes), which writes overrides to routes.json.
+# hardcoding tools and models. routes.json, next to this file (or
+# AICLI_ROUTES), overrides these live; `aicli route ...` edits it.
 
 [classes.maintenance]
 description = "Repository maintenance, CI fixes, security dependency updates"

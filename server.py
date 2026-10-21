@@ -4,7 +4,7 @@ front end for text callers like ai-job-search. Each request runs the real
 `claude`/`agy` CLI once, through the same argv builder as `aicli run`. It
 never reads OAuth tokens and never opens a network connection other than its
 own listening socket - every vendor call goes through the CLI subprocess
-under the user's own login. See ticket homelab-0013 for the why.
+under the user's own login.
 """
 import hmac
 import ipaddress
@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT))
 import aicli  # noqa: E402
 
 # Flags the service adds that a caller exec-ing the CLI itself never needs,
-# so they live here rather than in aicli.toml (see homelab-0013 criterion 1).
+# so they live here rather than in aicli.toml.
 PRINT_FLAG = {"claude": "-p", "agy": "--print"}
 STREAM_ARGS = {
     "claude": ["--output-format", "stream-json", "--verbose"],
@@ -80,7 +80,7 @@ def _content_text(content):
 
 def flatten_messages(messages):
     """System text first, then the turns. A single user message passes
-    through as it is - see homelab-0013's service spec."""
+    through as it is."""
     if len(messages) == 1 and messages[0].get("role") == "user":
         return _content_text(messages[0].get("content"))
     parts = []
