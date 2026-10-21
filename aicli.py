@@ -74,8 +74,9 @@ def resolve_bin(config, tool):
     return None
 
 
-def build_argv(config, tool, tier="default", effort=None, extra=None):
-    """The argv `run` would exec, or None if the binary can't be found."""
+def build_argv(config, tool, tier="default", effort=None, extra=None, model=None):
+    """The argv `run` would exec, or None if the binary can't be found. `model`
+    replaces the tier's model and any `--model` the caller passed (a fallback step)."""
     cfg = config[tool]
     bin_path = resolve_bin(config, tool)
     if bin_path is None:
@@ -87,7 +88,9 @@ def build_argv(config, tool, tier="default", effort=None, extra=None):
     argv = [bin_path, *cfg.get("args", [])]
 
     model_flag = cfg.get("model_flag", "")
-    model = cfg.get("tiers", {}).get(tier)
+    if model and model_flag:
+        extra = _drop_flag(extra, model_flag)
+    model = model or cfg.get("tiers", {}).get(tier)
     added_model = bool(model and model_flag and not _has_flag(extra, model_flag))
     if added_model:
         argv += [model_flag, model]
@@ -338,7 +341,7 @@ def _agy_usage(config, timeout):
     if result.returncode != 0:
         return {"state": UNKNOWN, "detail": "agy -p /usage failed", "bars": {}}
 
-    bars = {}
+    bars, groups = {}, {}
     for line in result.stdout.splitlines():
         cols = [c.strip() for c in line.split("\t")]
         if len(cols) < 3:
@@ -356,6 +359,7 @@ def _agy_usage(config, timeout):
         except ValueError:
             continue
         used = 100 - remaining
+        groups.setdefault(group, {})[period] = {"pct": used, "reset": reset}
         current = bars.get(period)
         is_primary = group.startswith(_AGY_PRIMARY_GROUP)
         was_primary = current is not None and current["group"].startswith(_AGY_PRIMARY_GROUP)
@@ -364,7 +368,9 @@ def _agy_usage(config, timeout):
 
     if not bars:
         return {"state": UNKNOWN, "detail": "no active limits reported", "bars": {}}
-    return {"state": OK, "detail": "", "bars": bars}
+    # Every group's own bars too: a fallback step that runs a Claude model through
+    # agy is limited by "Claude and GPT models", not by the Gemini bars above.
+    return {"state": OK, "detail": "", "bars": bars, "groups": groups}
 
 
 def compute_usage(config):
@@ -373,15 +379,140 @@ def compute_usage(config):
         claude_result, agy_result = pool.map(
             lambda fn: fn(config, timeout), (_claude_usage, _agy_usage)
         )
-    return {"claude": claude_result, "agy": agy_result}
+    # Remembered for `run`, whose own probe has seconds, not half a minute: the
+    # cockpit's poll keeps the cache warm.
+    return {"claude": _cached_quota("claude", claude_result), "agy": _cached_quota("agy", agy_result)}
 
 
 def get_tool_quota(config, tool, timeout=3.0):
     try:
         fn = _claude_usage if tool == "claude" else _agy_usage
-        return fn(config, timeout)
+        result = fn(config, timeout)
     except Exception:
-        return {"state": UNKNOWN, "bars": {}}
+        result = {"state": UNKNOWN, "bars": {}}
+    return _cached_quota(tool, result)
+
+
+QUOTA_CACHE_MAX_AGE = 30 * 60
+
+
+def _quota_cache_path():
+    return Path(os.environ.get("AICLI_QUOTA_CACHE", DEFAULT_USAGE_LOG.with_name("quota.json"))).expanduser()
+
+
+def _cached_quota(tool, result):
+    """`result`, remembered when it is a reading; when the probe timed out or failed,
+    the last reading of the last half hour instead. `run` probes with a short timeout,
+    and a fallback that only works when `claude -p /usage` answers in time would
+    miss most of the runs it is there for."""
+    path = _quota_cache_path()
+    try:
+        cache = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    now = datetime.now(timezone.utc).timestamp()
+    if result.get("state") == OK:
+        cache[tool] = {"at": now, "result": result}
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(f".tmp.{os.getpid()}")
+            tmp.write_text(json.dumps(cache), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass
+        return result
+    if result.get("detail", "").endswith("not found"):
+        return result       # no CLI to run at all: an old reading would hide that
+    hit = cache.get(tool) if isinstance(cache, dict) else None
+    if isinstance(hit, dict) and now - hit.get("at", 0) <= QUOTA_CACHE_MAX_AGE:
+        return {**hit["result"], "cached_at": datetime.fromtimestamp(hit["at"], timezone.utc).isoformat()}
+    return result
+
+
+# ---- fallback ----------------------------------------------------------------
+#
+# [fallback] in aicli.toml: once a tool's five-hour or weekly bar reaches `at`
+# percent, its runs go to the first step of `[[fallback.<tool>]]` that still has
+# room. A step names the tool, the agy quota group that limits it, and the model
+# per tier. An unknown reading counts as room: a probe that timed out must not
+# move work off a plan that still has quota.
+
+DEFAULT_FALLBACK_AT = 95
+
+
+def fallback_at(config):
+    return int(config.get("fallback", {}).get("at", DEFAULT_FALLBACK_AT))
+
+
+def fallback_steps(config, tool):
+    steps = config.get("fallback", {}).get(tool, [])
+    return [s for s in steps if isinstance(s, dict) and s.get("tool") in TOOLS]
+
+
+def meter(result, group=None):
+    """(highest % used across the bars, reset of that bar) for a quota result, or
+    (None, "") when there is no reading. `group` picks one agy quota group."""
+    if not result or result.get("state") != OK:
+        return None, ""
+    bars = result.get("groups", {}).get(group, {}) if group else result.get("bars", {})
+    readings = [b for b in bars.values() if isinstance(b, dict) and "pct" in b]
+    if not readings:
+        return None, ""
+    top = max(readings, key=lambda b: b["pct"])
+    return top["pct"], top.get("reset", "")
+
+
+def pick_fallback(config, tool, tier, quota):
+    """The step to run instead of `tool`'s own `tier` model, or None when `tool` has
+    room, has no fallback, or every step is out too. `quota(tool)` returns that
+    tool's quota result; it is only asked for the tools the decision needs."""
+    steps = fallback_steps(config, tool)
+    if not steps:
+        return None
+    at = fallback_at(config)
+    pct, reset = meter(quota(tool))
+    if pct is None or pct < at:
+        return None
+    for step in steps:
+        step_pct, _ = meter(quota(step["tool"]), step.get("group"))
+        if step_pct is not None and step_pct >= at:
+            continue
+        model = step.get("tiers", {}).get(tier) or config.get(step["tool"], {}).get("tiers", {}).get(tier)
+        return {
+            "tool": step["tool"], "model": model, "group": step.get("group"),
+            "from_tool": tool, "from_model": config.get(tool, {}).get("tiers", {}).get(tier),
+            "reason": f"{tool} quota {pct}% used (fallback at {at}%)" + (f", resets {reset}" if reset else ""),
+        }
+    return None
+
+
+def fallback_status(config, usage):
+    """Each fallback chain as the cockpit shows it: one row per step (the tool's own
+    plan first), its reading, and which step new runs go to now."""
+    at = fallback_at(config)
+    chains = {}
+    for tool in TOOLS:
+        steps = fallback_steps(config, tool)
+        if not steps:
+            continue
+        rows = [{"tool": tool, "group": None, "label": f"{tool} plan", "tiers": config.get(tool, {}).get("tiers", {})}]
+        rows += [{"tool": s["tool"], "group": s.get("group"),
+                  "label": s.get("label") or f"{s['tool']}: {s.get('group') or 'plan'}",
+                  "tiers": s.get("tiers") or config.get(s["tool"], {}).get("tiers", {})} for s in steps]
+        active = None
+        for i, row in enumerate(rows):
+            row["pct"], row["reset"] = meter(usage.get(row["tool"]), row["group"])
+            row["exhausted"] = row["pct"] is not None and row["pct"] >= at
+            if active is None and not row["exhausted"]:
+                active = i
+        for i, row in enumerate(rows):
+            row["active"] = i == active
+        chains[tool] = {"at": at, "steps": rows, "active": active, "all_exhausted": active is None}
+    return chains
+
+
+def usage_log_path():
+    return Path(os.environ.get("AICLI_USAGE_LOG", DEFAULT_USAGE_LOG)).expanduser()
 
 
 # ---- command line ----------------------------------------------------------
@@ -401,6 +532,7 @@ def build_parser():
         p.add_argument("--client", help="client identifier (e.g. pjm:maintainer, ai-job-search)")
         p.add_argument("--class", dest="workload_class", help="workload class (e.g. maintenance, standard-dev)")
         p.add_argument("--json", action="store_true")
+        p.add_argument("--no-fallback", action="store_true", help="never move to a [fallback] step")
         p.add_argument("args", nargs=argparse.REMAINDER)
 
     add_tool_args(sub.add_parser("argv"))
@@ -414,6 +546,9 @@ def build_parser():
 
     p_usage = sub.add_parser("usage")
     p_usage.add_argument("--json", action="store_true")
+
+    p_fallback = sub.add_parser("fallback", help="each fallback chain, its readings and the step in use")
+    p_fallback.add_argument("--json", action="store_true")
 
     p_routes = sub.add_parser("routes")
     p_routes.add_argument("--json", action="store_true")
@@ -461,7 +596,8 @@ def cmd_argv(args, config):
         print(f"aicli: {e}", file=sys.stderr)
         return 2
 
-    argv = build_argv(config, tool, tier, effort, extra)
+    tool, fallback = _run_fallback(args, config, tool, tier, _quota_reader(config))
+    argv = build_argv(config, tool, tier, effort, extra, model=(fallback or {}).get("model"))
     if argv is None:
         print(f"{tool} CLI not found", file=sys.stderr)
         return 1
@@ -483,7 +619,11 @@ def cmd_resolve(args, config):
         print(f"aicli: {e}", file=sys.stderr)
         return 2
 
-    model = config.get(tool, {}).get("tiers", {}).get(tier, "unknown")
+    quota = _quota_reader(config)
+    fallback = None if args.no_fallback else pick_fallback(config, tool, tier, quota)
+    if fallback:
+        tool = fallback["tool"]
+    model = (fallback or {}).get("model") or config.get(tool, {}).get("tiers", {}).get(tier, "unknown")
     res = {
         "client": args.client,
         "class": resolved_class,
@@ -491,10 +631,11 @@ def cmd_resolve(args, config):
         "tier": tier,
         "model": model,
         "effort": effort,
+        "fallback": fallback,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     if args.quota or args.json:
-        res["quota"] = get_tool_quota(config, tool)
+        res["quota"] = quota(tool)
 
     if args.json:
         print(json.dumps(res, indent=2))
@@ -503,8 +644,31 @@ def cmd_resolve(args, config):
         if "quota" in res and res["quota"].get("bars"):
             bars = [f"{k}={v['pct']}%" for k, v in res["quota"]["bars"].items()]
             q_str = f" [quota: {', '.join(bars)}]"
-        print(f"{resolved_class or 'unclassified'}: {tool}/{tier} ({model}){q_str}")
+        fb = f" [fallback: {fallback['reason']}]" if fallback else ""
+        print(f"{resolved_class or 'unclassified'}: {tool}/{tier} ({model}){q_str}{fb}")
     return 0
+
+
+def _run_fallback(args, config, tool, tier, quota):
+    """(tool, fallback) for `run` and `argv`. A caller that pinned --tool built that
+    CLI's own flags, which the other CLI would not understand: it asks `aicli
+    resolve` first and builds for the answer. A step on the same tool only changes
+    the model, so it still applies."""
+    fallback = None if args.no_fallback else pick_fallback(config, tool, tier, quota)
+    if fallback and args.tool and fallback["tool"] != tool:
+        fallback = None
+    return (fallback["tool"] if fallback else tool), fallback
+
+
+def _quota_reader(config):
+    """quota(tool), probing each tool at most once."""
+    seen = {}
+
+    def quota(tool):
+        if tool not in seen:
+            seen[tool] = get_tool_quota(config, tool)
+        return seen[tool]
+    return quota
 
 
 def cmd_run(args, config):
@@ -522,7 +686,9 @@ def cmd_run(args, config):
         print(f"aicli: {e}", file=sys.stderr)
         return 2
 
-    argv = build_argv(config, tool, tier, effort, extra)
+    quota = _quota_reader(config)
+    tool, fallback = _run_fallback(args, config, tool, tier, quota)
+    argv = build_argv(config, tool, tier, effort, extra, model=(fallback or {}).get("model"))
     if argv is None:
         print(f"{tool} CLI not found", file=sys.stderr)
         return 1
@@ -530,7 +696,7 @@ def cmd_run(args, config):
     # the tier, and agy's tier model can drop the effort (model_sets_effort).
     model = _flag_value(argv, config[tool].get("model_flag", "")) or "unknown"
     effort = _flag_value(argv, config[tool].get("effort_flag", ""))
-    quota = get_tool_quota(config, tool)
+    quota = quota(tool)
 
     if getattr(args, "meta_out", None):
         meta = {
@@ -540,6 +706,7 @@ def cmd_run(args, config):
             "tier": tier,
             "model": model,
             "effort": effort,
+            "fallback": fallback,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "quota": quota,
         }
@@ -550,7 +717,7 @@ def cmd_run(args, config):
         os.replace(tmp, meta_path)
 
     try:
-        usage_log = Path(os.environ.get("AICLI_USAGE_LOG", DEFAULT_USAGE_LOG)).expanduser()
+        usage_log = usage_log_path()
         usage_log.parent.mkdir(parents=True, exist_ok=True)
         with open(usage_log, "a", encoding="utf-8") as f:
             f.write(json.dumps({
@@ -561,6 +728,7 @@ def cmd_run(args, config):
                 "tier": tier,
                 "model": model,
                 "quota": quota,
+                **({"fallback": fallback} if fallback else {}),
             }) + "\n")
     except OSError:
         pass
@@ -580,6 +748,24 @@ def cmd_usage(args, config):
         for period, bar in result["bars"].items():
             line += f" {period}={bar['pct']}% resets {bar['reset']}"
         print(line)
+    return 0
+
+
+def cmd_fallback(args, config):
+    chains = fallback_status(config, compute_usage(config))
+    if args.json:
+        print(json.dumps(chains, indent=2))
+        return 0
+    if not chains:
+        print("no [fallback] chains configured")
+    for tool, chain in chains.items():
+        print(f"{tool} (moves on at {chain['at']}%):")
+        for row in chain["steps"]:
+            pct = "?" if row["pct"] is None else f"{row['pct']}%"
+            mark = "->" if row["active"] else ("xx" if row["exhausted"] else "  ")
+            print(f"  {mark} {row['label']:32} {pct:>5}  {row['reset']}")
+        if chain["all_exhausted"]:
+            print("  every step is out; runs stay on " + tool)
     return 0
 
 
@@ -664,7 +850,7 @@ def main(argv=None):
     config = load_config(args.config)
     handler = {
         "which": cmd_which, "argv": cmd_argv, "run": cmd_run, "resolve": cmd_resolve,
-        "usage": cmd_usage, "routes": cmd_routes, "route": cmd_route,
+        "usage": cmd_usage, "fallback": cmd_fallback, "routes": cmd_routes, "route": cmd_route,
     }[args.command]
     return handler(args, config)
 

@@ -100,6 +100,26 @@ client routes. Edit it with `aicli route ...` or from a UI; saves go through
 a symlink to the real file, so a deployment can keep its routes in its own
 repo.
 
+### Fallback
+
+`[fallback]` moves runs off a plan that is out of quota. Once a tool's
+five-hour or weekly bar reaches `at` percent (95 by default), `resolve`,
+`argv` and `run` use the first `[[fallback.<tool>]]` step that still has
+room. A step names a tool, the agy quota `group` that limits it, and a model
+per tier. agy meters its Claude models apart from Gemini, so the shipped
+chain is: Claude plan → Claude through agy → Gemini 3.8 through agy.
+
+- An unknown reading counts as room. A probe that times out never moves work.
+- `run` probes with a short timeout. When that probe fails, it uses the last
+  good reading of the last 30 minutes, kept in `~/.local/state/aicli/quota.json`
+  (`$AICLI_QUOTA_CACHE`). `aicli usage` refreshes that file.
+- A caller that pins `--tool` built that CLI's own flags, so `run` never
+  moves it to another CLI. Such a caller asks `aicli resolve --tool T --json`
+  first and builds for the `tool` and `model` it returns. A fallback to a
+  step on the same tool still applies.
+- `--no-fallback` turns it off for one call. The usage log and `--meta-out`
+  record every fallback with its reason.
+
 ## Commands
 
 | Command | Does |
@@ -109,13 +129,14 @@ repo.
 | `aicli resolve [opts] [--quota] [--json]` | Print where a call would go, without running it |
 | `aicli which <tool>` | Print the real binary's path |
 | `aicli usage [--json]` | Each subscription's quota bars, from the CLI's `/usage` |
+| `aicli fallback [--json]` | Each fallback chain, its readings and the step in use |
 | `aicli routes [--json]` | Show the routing table |
 | `aicli route set-class NAME --tool T [--tier ...]` | Change a class's route |
 | `aicli route set-client ID [--class C] [--tool T] [--tier ...]` | Route one client |
 | `aicli route remove-client ID` | Drop a client's route |
 
-`opts` are `--client ID`, `--class NAME`, `--tool`, `--tier low|default|deep`
-and `--effort low|medium|high`.
+`opts` are `--client ID`, `--class NAME`, `--tool`, `--tier low|default|deep`,
+`--effort low|medium|high` and `--no-fallback`.
 
 Details worth knowing:
 

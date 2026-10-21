@@ -26,11 +26,13 @@ def setUpModule():
     _STATE = tempfile.TemporaryDirectory()
     os.environ["AICLI_USAGE_LOG"] = str(Path(_STATE.name) / "usage.jsonl")
     os.environ["AICLI_ROUTES"] = str(Path(_STATE.name) / "routes.json")
+    os.environ["AICLI_QUOTA_CACHE"] = str(Path(_STATE.name) / "quota.json")
 
 
 def tearDownModule():
     os.environ.pop("AICLI_USAGE_LOG", None)
     os.environ.pop("AICLI_ROUTES", None)
+    os.environ.pop("AICLI_QUOTA_CACHE", None)
     _STATE.cleanup()
 
 
@@ -58,7 +60,9 @@ def make_config(tmp_dir, **overrides):
         cfg[tool].update(patch)
     # The real workload classes, so routing tests use what ships.
     with open(ROOT / "aicli.toml", "rb") as f:
-        cfg["classes"] = tomllib.load(f)["classes"]
+        shipped = tomllib.load(f)
+    cfg["classes"] = shipped["classes"]
+    cfg["fallback"] = shipped["fallback"]
     path = tmp_dir / "aicli.toml"
     path.write_text(_to_toml(cfg))
     return path, cfg
@@ -79,6 +83,20 @@ def _to_toml(cfg):
         lines.append(f"\n[{tool}.tiers]")
         for tier, model in t["tiers"].items():
             lines.append(f'{tier} = "{model}"')
+    if "fallback" in cfg:
+        lines.append("\n[fallback]")
+        lines.append(f"at = {cfg['fallback']['at']}")
+        for tool, steps in cfg["fallback"].items():
+            if tool == "at":
+                continue
+            for step in steps:
+                lines.append(f"\n[[fallback.{tool}]]")
+                for key, value in step.items():
+                    if isinstance(value, dict):
+                        value = "{ " + ", ".join(f"{k} = {json.dumps(v)}" for k, v in value.items()) + " }"
+                        lines.append(f"{key} = {value}")
+                    else:
+                        lines.append(f"{key} = {json.dumps(value)}")
     for name, c in cfg.get("classes", {}).items():
         lines.append(f"\n[classes.{name}]")
         for key, value in c.items():
@@ -573,3 +591,147 @@ class RoutingTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+CLAUDE_OUT = """Current session: 20% used · resets Oct 22, 3:49am (Europe/Paris)
+Current week (all models): 96% used · resets Oct 26, 5:59pm (Europe/Paris)
+"""
+AGY_ROOM = """Gemini Models\tWeekly Limit Remaining\t40%\t2026-10-23T22:43:51Z
+Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-28T21:47:44Z
+"""
+AGY_CLAUDE_OUT = """Gemini Models\tWeekly Limit Remaining\t40%\t2026-10-23T22:43:51Z
+Claude and GPT models\tWeekly Limit Remaining\t3%\t2026-10-28T21:47:44Z
+"""
+
+
+def reading(**bars):
+    return {"state": "ok", "detail": "", "bars": {k: {"pct": v, "reset": "soon"} for k, v in bars.items()}}
+
+
+def agy_reading(**groups):
+    return {"state": "ok", "detail": "", "bars": {},
+            "groups": {g.replace("_", " "): {"weekly": {"pct": v, "reset": "later"}} for g, v in groups.items()}}
+
+
+class FallbackTests(unittest.TestCase):
+    def setUp(self):
+        with open(ROOT / "aicli.toml", "rb") as f:
+            self.config = tomllib.load(f)
+        # Each test its own quota cache.
+        self._dir = tempfile.TemporaryDirectory()
+        self._old_cache = os.environ["AICLI_QUOTA_CACHE"]
+        os.environ["AICLI_QUOTA_CACHE"] = str(Path(self._dir.name) / "quota.json")
+
+    def tearDown(self):
+        os.environ["AICLI_QUOTA_CACHE"] = self._old_cache
+        self._dir.cleanup()
+
+    def pick(self, claude, agy, tier="deep"):
+        return aicli.pick_fallback(self.config, "claude", tier, {"claude": claude, "agy": agy}.get)
+
+    def test_claude_with_room_stays_on_claude(self):
+        self.assertIsNone(self.pick(reading(weekly=60, five_hour=10), agy_reading(Gemini_Models=10)))
+
+    def test_claude_out_moves_to_claude_through_agy(self):
+        fb = self.pick(reading(weekly=96, five_hour=10), agy_reading(Gemini_Models=60, **{"Claude and GPT models": 0}))
+        self.assertEqual((fb["tool"], fb["model"], fb["group"]), ("agy", "claude-opus-5-5-high", "Claude and GPT models"))
+        self.assertEqual(fb["from_model"], "claude-opus-5-5")
+        self.assertIn("96%", fb["reason"])
+
+    def test_the_five_hour_bar_counts_too(self):
+        fb = self.pick(reading(weekly=10, five_hour=100), agy_reading(Gemini_Models=10), tier="default")
+        self.assertEqual(fb["model"], "claude-sonnet-5-5-high")
+
+    def test_agy_claude_models_out_moves_to_gemini(self):
+        fb = self.pick(reading(weekly=100), agy_reading(Gemini_Models=60, **{"Claude and GPT models": 97}))
+        self.assertEqual((fb["tool"], fb["model"], fb["group"]), ("agy", "gemini-3.8-flash-high", "Gemini Models"))
+
+    def test_every_step_out_stays_on_claude(self):
+        self.assertIsNone(self.pick(reading(weekly=100), agy_reading(Gemini_Models=99, **{"Claude and GPT models": 99})))
+
+    def test_an_unknown_claude_reading_never_falls_back(self):
+        self.assertIsNone(self.pick({"state": "unknown", "bars": {}}, agy_reading(Gemini_Models=0)))
+
+    def test_no_chain_no_fallback(self):
+        self.assertIsNone(aicli.pick_fallback({"claude": {}}, "claude", "deep", lambda t: reading(weekly=100)))
+
+    def test_status_marks_the_step_in_use(self):
+        chains = aicli.fallback_status(self.config, {
+            "claude": reading(weekly=96), "agy": agy_reading(Gemini_Models=60, **{"Claude and GPT models": 0})})
+        steps = chains["claude"]["steps"]
+        self.assertEqual([s["label"] for s in steps], ["claude plan", "agy: Claude models", "agy: Gemini 3.8"])
+        self.assertEqual([s["active"] for s in steps], [False, True, False])
+        self.assertEqual([s["pct"] for s in steps], [96, 0, 60])
+        self.assertTrue(steps[0]["exhausted"])
+        self.assertFalse(chains["claude"]["all_exhausted"])
+
+    def test_agy_usage_keeps_every_group(self):
+        with tempfile.TemporaryDirectory() as d:
+            config_path, _ = make_config(Path(d))
+            result = run_aicli("usage", "--json", config_path=config_path)
+        groups = json.loads(result.stdout)["agy"]["groups"]
+        self.assertEqual(groups["Claude and GPT models"]["weekly"]["pct"], 50)
+        self.assertEqual(groups["Gemini Models"]["weekly"]["pct"], 6)
+
+    def test_a_failed_probe_uses_the_last_reading(self):
+        ok = reading(weekly=96)
+        self.assertEqual(aicli._cached_quota("claude", ok), ok)
+        got = aicli._cached_quota("claude", {"state": "unknown", "detail": "timed out", "bars": {}})
+        self.assertEqual(got["bars"]["weekly"]["pct"], 96)
+        self.assertIn("cached_at", got)
+
+
+class FallbackCliTests(unittest.TestCase):
+    """`aicli run/resolve` against the fake CLIs, with the Claude plan at 96%."""
+
+    def run_cli(self, *args, agy=AGY_ROOM):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            config_path, _ = make_config(d)
+            (d / "claude.txt").write_text(CLAUDE_OUT)
+            (d / "agy.txt").write_text(agy)
+            log = d / "usage.jsonl"
+            res = subprocess.run(
+                [sys.executable, str(AICLI), *args], capture_output=True, text=True,
+                env={**os.environ, "AICLI_CONFIG": str(config_path), "AICLI_USAGE_LOG": str(log),
+                     "AICLI_QUOTA_CACHE": str(d / "quota.json"), "FAKE_CLAUDE_USAGE": str(d / "claude.txt"), "FAKE_AGY_USAGE": str(d / "agy.txt")},
+            )
+            rows = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return res.stdout, rows
+
+    def test_run_by_class_moves_to_agy_with_the_fallback_model(self):
+        out, rows = self.run_cli("run", "--class", "deep-spec", "--client", "x:y", "--", "-p", "hi")
+        self.assertEqual(json.loads(out), [str(FAKE_CLI / "fake-agy"), "--model", "claude-opus-5-5-high", "-p", "hi"])
+        self.assertEqual(rows[-1]["tool"], "agy")
+        self.assertEqual(rows[-1]["model"], "claude-opus-5-5-high")
+        self.assertEqual(rows[-1]["fallback"]["from_tool"], "claude")
+
+    def test_run_drops_the_callers_claude_model_on_fallback(self):
+        out, _ = self.run_cli("run", "--class", "standard-dev", "--", "--model", "claude-sonnet-5", "-p", "hi")
+        self.assertEqual(json.loads(out), [str(FAKE_CLI / "fake-agy"), "--model", "claude-sonnet-5-5-high", "-p", "hi"])
+
+    def test_run_with_a_pinned_tool_stays_on_it(self):
+        out, rows = self.run_cli("run", "--tool", "claude", "--class", "deep-spec", "--", "-p", "hi")
+        self.assertEqual(json.loads(out)[0], str(FAKE_CLI / "fake-claude"))
+        self.assertNotIn("fallback", rows[-1])
+
+    def test_no_fallback_flag(self):
+        out, _ = self.run_cli("run", "--no-fallback", "--class", "deep-spec", "--", "-p", "hi")
+        self.assertEqual(json.loads(out)[0], str(FAKE_CLI / "fake-claude"))
+
+    def test_resolve_names_the_fallback_for_a_pinned_tool(self):
+        out, _ = self.run_cli("resolve", "--tool", "claude", "--class", "deep-spec", "--json")
+        data = json.loads(out)
+        self.assertEqual((data["tool"], data["model"]), ("agy", "claude-opus-5-5-high"))
+        self.assertEqual(data["fallback"]["group"], "Claude and GPT models")
+
+    def test_resolve_skips_an_exhausted_agy_group(self):
+        out, _ = self.run_cli("resolve", "--class", "standard-dev", "--json", agy=AGY_CLAUDE_OUT)
+        self.assertEqual(json.loads(out)["model"], "gemini-3.8-flash-high")
+
+    def test_fallback_command_json(self):
+        out, _ = self.run_cli("fallback", "--json")
+        chain = json.loads(out)["claude"]
+        self.assertEqual(chain["active"], 1)
+        self.assertEqual(chain["steps"][0]["pct"], 96)
