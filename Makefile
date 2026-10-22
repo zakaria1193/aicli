@@ -5,14 +5,15 @@
 PYTHON ?= python3
 LINK ?= $(HOME)/.local/bin/aicli
 
-.PHONY: help install uninstall test
+.PHONY: help install uninstall test check-quota
 
 help:
 	@echo "aicli"
 	@echo "====="
-	@echo "  make install    - Link $(LINK) -> aicli.py"
-	@echo "  make uninstall  - Remove that link"
-	@echo "  make test       - Run the unit tests (fake CLI only, no real quota)"
+	@echo "  make install      - Link $(LINK) -> aicli.py"
+	@echo "  make uninstall    - Remove that link"
+	@echo "  make test         - Run the unit tests (fake CLI only, no real quota)"
+	@echo "  make check-quota  - Verify /usage quota & reset parsing against fixtures and live CLIs"
 
 install:
 	@$(PYTHON) -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
@@ -28,3 +29,6 @@ uninstall:
 
 test:
 	@$(PYTHON) -m unittest discover -s tests -v
+
+check-quota:
+	@$(PYTHON) aicli.py check-quota
