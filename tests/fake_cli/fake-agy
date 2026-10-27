@@ -31,6 +31,9 @@ elif "--output-format" in args and "stream-json" in args:
     for line in Path(__file__).with_name("stream-agy.jsonl").read_text().splitlines():
         print(line)
         sys.stdout.flush()
+elif "--output-format" in args and "json" in args:
+    print(json.dumps({"result": json.dumps([sys.argv[0], *args]),
+                      "usage": {"input_tokens": 11, "output_tokens": 5}}))
 else:
     print(json.dumps([sys.argv[0], *args]))
 

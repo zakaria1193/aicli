@@ -334,14 +334,23 @@ uses.
 
 Every `aicli run` and every HTTP request appends a JSON line to
 `$AICLI_USAGE_LOG` (default `~/.local/state/aicli/usage.jsonl`): when, client,
-class, backend, tier, model, and for HTTP requests the token counts the CLI
-reported.
+class, backend, tier, model, and the token counts the CLI reported.
 
 ```json
 {"at": "2026-10-14T18:20:00+00:00", "tool": "claude", "tier": "default",
  "stream": false, "model": "claude-sonnet-5", "client": "pjm", "reported": true,
  "input": 3, "output": 7, "cache_write": 20, "cache_read": 100, "total": 130}
 ```
+
+`aicli run` passes the CLI's stdout through unchanged and reads the counts from
+it after the CLI exits, so they need `--output-format json` or `stream-json`
+(claude and agy). Without them the line is an **estimate**: about 4 characters
+per token, input from the arguments (a prompt piped on stdin is not seen) and
+output from stdout. Estimated lines carry `"estimated": true` next to
+`"reported": true`, so readers can tell them from real counts. A run with no
+output logs `"reported": false`. When stdout is a terminal (an interactive
+session) `aicli run` execs the CLI directly and logs `"reported": false`.
+The exit code is the CLI's.
 
 The HTTP client name comes from the `X-Aicli-Client` header, else the OpenAI
 `user` field, else `AICLI_REMOTE_CLIENT` for remote callers, else `unknown`.

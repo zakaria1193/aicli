@@ -106,40 +106,8 @@ def build_run_argv(config, tool, tier, effort, prompt, stream):
 
 # --- token usage -------------------------------------------------------------
 
-_CLAUDE_MODEL_KEYS = {"inputTokens": "input", "outputTokens": "output",
-                      "cacheCreationInputTokens": "cache_write", "cacheReadInputTokens": "cache_read"}
-_USAGE_KEYS = {"input_tokens": "input", "prompt_tokens": "input",
-               "output_tokens": "output", "completion_tokens": "output",
-               "cache_creation_input_tokens": "cache_write", "cache_read_input_tokens": "cache_read",
-               "total_tokens": "total"}
-
-
-def _counts(raw, keys):
-    out = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
-    for key, kind in keys.items():
-        value = raw.get(key)
-        if isinstance(value, (int, float)):
-            out[kind] = out.get(kind, 0) + int(value)
-    if not out.get("total"):
-        out["total"] = out["input"] + out["output"] + out["cache_write"] + out["cache_read"]
-    return out
-
-
-def usage_of(tool, result, model):
-    """Token counts per model from the CLI's final result: {model: counts}, or
-    None when the CLI reported none. claude gives `modelUsage` per model (and
-    a flat `usage`); agy gives a flat `usage` under its result."""
-    if not isinstance(result, dict):
-        return None
-    if tool == "claude" and isinstance(result.get("modelUsage"), dict) and result["modelUsage"]:
-        return {m: _counts(u, _CLAUDE_MODEL_KEYS)
-                for m, u in result["modelUsage"].items() if isinstance(u, dict)}
-    usage = result.get("usage")
-    if tool == "agy" and not isinstance(usage, dict) and isinstance(result.get("result"), dict):
-        usage = result["result"].get("usage")
-    if isinstance(usage, dict) and usage:
-        return {model or tool: _counts(usage, _USAGE_KEYS)}
-    return None
+_counts = aicli.usage_counts
+usage_of = aicli.usage_of
 
 
 MAX_CLIENT_LEN = 80

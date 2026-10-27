@@ -510,6 +510,71 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(data["model"], "claude-opus-5-5")
             self.assertEqual(data["effort"], "high")
 
+    def _run_logged(self, d, *args, tool="claude"):
+        config_path, _ = make_config(Path(d))
+        usage_log = Path(d) / "usage.jsonl"
+        res = subprocess.run(
+            [sys.executable, str(AICLI), "run", "--client", "t:x", "--tool", tool, "--", *args],
+            capture_output=True, text=True,
+            env={**os.environ, "AICLI_CONFIG": str(config_path), "AICLI_USAGE_LOG": str(usage_log)},
+        )
+        rows = [json.loads(line) for line in usage_log.read_text().splitlines()]
+        return res, rows
+
+    def test_run_logs_the_token_counts_claude_reports(self):
+        with tempfile.TemporaryDirectory() as d:
+            res, rows = self._run_logged(d, "-p", "hi", "--output-format", "json")
+        self.assertEqual(res.returncode, 0)
+        self.assertIn('"modelUsage"', res.stdout)  # output passed through untouched
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual((row["model"], row["reported"], row["client"]), ("claude-sonnet-5", True, "t:x"))
+        self.assertNotIn("estimated", row)
+        self.assertEqual((row["input"], row["output"], row["cache_read"], row["total"]), (3, 7, 100, 130))
+
+    def test_run_logs_the_token_counts_agy_reports(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, rows = self._run_logged(d, "-p", "hi", "--output-format", "json", tool="agy")
+        self.assertEqual((rows[0]["reported"], rows[0]["input"], rows[0]["output"]), (True, 11, 5))
+        self.assertNotIn("estimated", rows[0])
+
+    def test_run_logs_counts_from_the_final_stream_event(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, rows = self._run_logged(d, "-p", "hi", "--output-format", "stream-json")
+        self.assertEqual({r["model"] for r in rows}, {"claude-sonnet-5", "claude-haiku-5-5"})
+        self.assertTrue(all(r["reported"] for r in rows))
+
+    def test_run_estimates_counts_when_the_cli_reports_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            res, rows = self._run_logged(d, "-p", "hello there")
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["reported"])
+        self.assertTrue(rows[0]["estimated"])
+        self.assertGreater(rows[0]["input"], 0)
+        self.assertGreater(rows[0]["output"], 0)
+        self.assertEqual(rows[0]["total"], rows[0]["input"] + rows[0]["output"])
+
+    def test_run_passes_the_exit_code_through_and_still_logs(self):
+        with tempfile.TemporaryDirectory() as d:
+            config_path, _ = make_config(Path(d))
+            usage_log = Path(d) / "usage.jsonl"
+            res = subprocess.run(
+                [sys.executable, str(AICLI), "run", "--tool", "claude", "--", "-p", "x"],
+                capture_output=True, text=True,
+                env={**os.environ, "AICLI_CONFIG": str(config_path), "AICLI_USAGE_LOG": str(usage_log),
+                     "FAKE_CLI_EXIT_CODE": "3"},
+            )
+            self.assertEqual(res.returncode, 3)
+            self.assertEqual(len(usage_log.read_text().splitlines()), 1)
+
+    def test_estimate_is_marked_and_skipped_for_no_output(self):
+        self.assertEqual(aicli.estimate_tokens(400), 100)
+        self.assertEqual(aicli.run_usage_fields("claude", "m", "", 0, 0), (None, False))
+        usage, est = aicli.run_usage_fields("claude", "m", "abcdefgh", 8, 8)
+        self.assertTrue(est)
+        self.assertEqual(usage["m"]["total"], 4)
+
     def test_run_cli_not_found_writes_no_meta_or_usage(self):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d), claude={"bin": str(Path(d) / "missing")})
