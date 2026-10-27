@@ -76,6 +76,7 @@ aicli run --client demo --class lightweight-task -- -p "say hi"
 | `managerial-audit` | scheduled reports, watchdogs, audits |
 | `standard-dev` | everyday code changes |
 | `deep-spec` | architecture, long specs, deep reviews |
+| `brainstorm` | divergent idea generation, mind maps |
 | `interactive-shell` | a human at a terminal |
 
 **Clients** name the caller, like `myrepo:summarize`. A client can override
