@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -986,6 +987,82 @@ def check_quota_health(config, fixtures_dir=None, live=True):
     return {"ok": len(errors) == 0, "checks": checks, "errors": errors}
 
 
+_CLAUDE_MODEL_KEYS = {"inputTokens": "input", "outputTokens": "output",
+                      "cacheCreationInputTokens": "cache_write", "cacheReadInputTokens": "cache_read"}
+_USAGE_KEYS = {"input_tokens": "input", "prompt_tokens": "input",
+               "output_tokens": "output", "completion_tokens": "output",
+               "cache_creation_input_tokens": "cache_write", "cache_read_input_tokens": "cache_read",
+               "total_tokens": "total"}
+
+
+def usage_counts(raw, keys):
+    out = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
+    for key, kind in keys.items():
+        value = raw.get(key)
+        if isinstance(value, (int, float)):
+            out[kind] = out.get(kind, 0) + int(value)
+    if not out.get("total"):
+        out["total"] = out["input"] + out["output"] + out["cache_write"] + out["cache_read"]
+    return out
+
+
+def usage_of(tool, result, model):
+    """Token counts per model from the CLI's final result: {model: counts}, or
+    None when the CLI reported none. claude gives `modelUsage` per model (and
+    a flat `usage`); agy gives a flat `usage` under its result."""
+    if not isinstance(result, dict):
+        return None
+    if tool == "claude" and isinstance(result.get("modelUsage"), dict) and result["modelUsage"]:
+        return {m: usage_counts(u, _CLAUDE_MODEL_KEYS)
+                for m, u in result["modelUsage"].items() if isinstance(u, dict)}
+    usage = result.get("usage")
+    if tool == "agy" and not isinstance(usage, dict) and isinstance(result.get("result"), dict):
+        usage = result["result"].get("usage")
+    if isinstance(usage, dict) and usage:
+        return {model or tool: usage_counts(usage, _USAGE_KEYS)}
+    return None
+
+
+def parse_cli_output(text):
+    """The last JSON object a CLI printed that carries token counts, or None.
+    Handles one JSON document (`--output-format json`) and JSON lines
+    (`stream-json`, where the final `result` event has the counts)."""
+    found = None
+    docs = [text] + text.splitlines()
+    for chunk in docs:
+        chunk = chunk.strip()
+        if not chunk.startswith("{"):
+            continue
+        try:
+            obj = json.loads(chunk)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and (obj.get("modelUsage") or obj.get("usage")
+                                      or isinstance(obj.get("result"), dict)):
+            found = obj
+    return found
+
+
+def estimate_tokens(chars):
+    """~4 characters per token. Only used when the CLI reports nothing."""
+    return max(1, round(chars / 4)) if chars else 0
+
+
+def run_usage_fields(tool, model, stdout_text, argv_chars, stdout_chars):
+    """Fields `aicli run` adds to its usage-log line: {model: counts} rows plus
+    whether they are an estimate. Counts the CLI reported win; otherwise the
+    prompt (argv) and the answer (stdout) are estimated and marked."""
+    reported = usage_of(tool, parse_cli_output(stdout_text), model)
+    if reported:
+        return reported, False
+    out = estimate_tokens(stdout_chars)
+    inp = estimate_tokens(argv_chars)
+    if not (inp or out):
+        return None, False
+    return {model or tool: {"input": inp, "output": out, "cache_write": 0, "cache_read": 0,
+                            "total": inp + out}}, True
+
+
 def usage_log_path():
     return Path(os.environ.get("AICLI_USAGE_LOG", DEFAULT_USAGE_LOG)).expanduser()
 
@@ -1214,24 +1291,73 @@ def cmd_run(args, config):
         tmp.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
         os.replace(tmp, meta_path)
 
+    row = {
+        "client": args.client,
+        "class": resolved_class,
+        "tool": tool,
+        "tier": tier,
+        "model": model,
+        "quota": quota_res,
+        **({"fallback": fallback} if fallback else {}),
+    }
+    if sys.stdout.isatty():
+        # An interactive session: its output is the screen, not a pipe we can
+        # read, so exec the CLI as-is and log the request without counts.
+        _log_run(row, None, False)
+        os.execv(argv[0], argv)  # never returns
+    return _run_captured(argv, tool, model, row)
+
+
+def _log_run(row, usage, estimated):
+    """Append the run to the usage log, one line per model the CLI used. A
+    run without counts gets one line with `reported: false`; estimated counts
+    are `reported: true, estimated: true`. An unwritable log never fails a run."""
+    at = datetime.now(timezone.utc).isoformat()
+    if usage:
+        lines = [{"at": at, **row, "model": m, "reported": True, **({"estimated": True} if estimated else {}), **counts}
+                 for m, counts in usage.items()]
+    else:
+        lines = [{"at": at, **row, "reported": False}]
     try:
-        usage_log = usage_log_path()
-        usage_log.parent.mkdir(parents=True, exist_ok=True)
-        with open(usage_log, "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "at": datetime.now(timezone.utc).isoformat(),
-                "client": args.client,
-                "class": resolved_class,
-                "tool": tool,
-                "tier": tier,
-                "model": model,
-                "quota": quota_res,
-                **({"fallback": fallback} if fallback else {}),
-            }) + "\n")
+        path = usage_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            for line in lines:
+                f.write(json.dumps(line) + "\n")
     except OSError:
         pass
 
-    os.execv(argv[0], argv)  # never returns
+
+MAX_CAPTURE = 16 * 1024 * 1024
+
+
+def _run_captured(argv, tool, model, row):
+    """Run the CLI with its stdout passed through unchanged while a copy is
+    kept, then log the token counts it reported (or an estimate)."""
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE)
+    old = signal.signal(signal.SIGTERM, lambda signum, frame: proc.terminate())
+    kept, size = [], 0
+    try:
+        for chunk in iter(lambda: proc.stdout.read1(65536), b""):
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+            if size < MAX_CAPTURE:
+                kept.append(chunk)
+            size += len(chunk)
+        code = proc.wait()
+    except KeyboardInterrupt:
+        proc.wait()
+        code = 130
+    except BrokenPipeError:
+        proc.terminate()
+        code = proc.wait()
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    text = b"".join(kept).decode("utf-8", errors="replace")
+    argv_chars = sum(len(a) for a in argv[1:])
+    usage, estimated = run_usage_fields(tool, model, text, argv_chars, len(text))
+    _log_run(row, usage, estimated)
+    return code
 
 
 def cmd_usage(args, config):
