@@ -77,6 +77,8 @@ aicli run --client demo --class lightweight-task -- -p "say hi"
 | `standard-dev` | everyday code changes |
 | `deep-spec` | architecture, long specs, deep reviews |
 | `brainstorm` | divergent idea generation, mind maps |
+| `conversation` | talking to a project agent, quick answers (pjm Chief of staff, Tech lead) |
+| `conversation-deep` | talking to a project agent that must think and push back (pjm Product lead) |
 | `interactive-shell` | a human at a terminal |
 
 **Clients** name the caller, like `myrepo:summarize`. A client can override
