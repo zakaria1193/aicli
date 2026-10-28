@@ -83,8 +83,11 @@ aicli run --client demo --class lightweight-task -- -p "say hi"
 its class's route, and a longer name also matches a shorter one
 (`pjm:p-0001:auto-execute` falls back to `pjm:auto-execute`).
 
-**Routing order:** an explicit `--tool`, `--tier` or `--effort` wins, then the
-client's own route, then its class. Without a class or a `--tool`, aicli
+**Routing order:** an explicit `--tool` wins, then the client's own route
+(`ID@CLASS` before `ID`), then its class. A caller passes only `--client` and
+`--class`: there is no `--tier`, `--effort` or `--model` on `aicli run`, `argv`
+or `resolve`. The tier, model and effort live in the router (`routes.json`,
+edited with `aicli route`). Without a class or a `--tool`, aicli
 exits 2.
 
 ## Config
@@ -133,11 +136,10 @@ chain is: Claude plan → Claude through agy → Gemini 3.8 through agy.
 | `aicli fallback [--json]` | Each fallback chain, its readings and the step in use |
 | `aicli routes [--json]` | Show the routing table |
 | `aicli route set-class NAME --tool T [--tier ...]` | Change a class's route |
-| `aicli route set-client ID [--class C] [--tool T] [--tier ...] [--model M]` | Route one client. `--model` is the only place a model is pinned: name the client `ID@CLASS` to pin it for one class |
+| `aicli route set-client ID [--class C] [--tool T] [--tier ...] [--effort E] [--model M]` | Route one client. `--model` is the only place a model is pinned: name the client `ID@CLASS` to pin it for one class |
 | `aicli route remove-client ID` | Drop a client's route |
 
-`opts` are `--client ID`, `--class NAME`, `--tool`, `--tier low|default|deep`,
-`--effort low|medium|high` and `--no-fallback`.
+`opts` are `--client ID`, `--class NAME`, `--tool` and `--no-fallback`.
 
 Details worth knowing:
 

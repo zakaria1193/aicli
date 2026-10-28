@@ -280,7 +280,7 @@ def route_model(routes, client, workload_class):
 
 
 def resolve_route(config, client=None, workload_class=None, requested_tool=None,
-                  requested_tier=None, requested_effort=None, routes=None):
+                  routes=None):
     if routes is None:
         routes = load_routes(config)
     classes = routes.get("classes") or {}
@@ -314,10 +314,6 @@ def resolve_route(config, client=None, workload_class=None, requested_tool=None,
 
     if requested_tool:
         target_tool = requested_tool
-    if requested_tier:
-        target_tier = requested_tier
-    if requested_effort:
-        target_effort = requested_effort
 
     if not target_tool:
         raise ValueError("either --tool, --class, or a known --client is required")
@@ -1288,8 +1284,6 @@ def build_parser():
 
     def add_tool_args(p):
         p.add_argument("--tool", choices=TOOLS)
-        p.add_argument("--tier", choices=TIERS)
-        p.add_argument("--effort", choices=EFFORTS)
         p.add_argument("--client", help="client identifier (e.g. pjm:maintainer, ai-job-search)")
         p.add_argument("--class", dest="workload_class", help="workload class (e.g. maintenance, standard-dev)")
         p.add_argument("--json", action="store_true")
@@ -1334,6 +1328,7 @@ def build_parser():
     p_set_cli.add_argument("--class", dest="workload_class")
     p_set_cli.add_argument("--tool", choices=TOOLS)
     p_set_cli.add_argument("--tier", choices=TIERS)
+    p_set_cli.add_argument("--effort", choices=EFFORTS)
     p_set_cli.add_argument("--model", help="pin this model for the client (name it `<client>@<class>` to pin it for one class only)")
 
     p_del_cli = route_sub.add_parser("remove-client")
@@ -1379,8 +1374,6 @@ def cmd_argv(args, config):
             client=args.client,
             workload_class=args.workload_class,
             requested_tool=args.tool,
-            requested_tier=args.tier,
-            requested_effort=args.effort,
             routes=routes,
         )
     except ValueError as e:
@@ -1407,8 +1400,6 @@ def cmd_resolve(args, config):
             client=args.client,
             workload_class=args.workload_class,
             requested_tool=args.tool,
-            requested_tier=args.tier,
-            requested_effort=args.effort,
             routes=routes,
         )
     except ValueError as e:
@@ -1483,8 +1474,6 @@ def cmd_run(args, config):
             client=args.client,
             workload_class=args.workload_class,
             requested_tool=args.tool,
-            requested_tier=args.tier,
-            requested_effort=args.effort,
             routes=routes,
         )
     except ValueError as e:
@@ -1737,6 +1726,8 @@ def cmd_route(args, config):
             entry["tool"] = args.tool
         if args.tier:
             entry["tier"] = args.tier
+        if args.effort:
+            entry["effort"] = args.effort
         if args.model:
             entry["model"] = args.model
         save_routes(routes, config)
