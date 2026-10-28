@@ -86,9 +86,9 @@ its class's route, and a longer name also matches a shorter one
 **Routing order:** an explicit `--tool` wins, then the client's own route
 (`ID@CLASS` before `ID`), then its class. A caller passes only `--client` and
 `--class`: there is no `--tier`, `--effort` or `--model` on `aicli run`, `argv`
-or `resolve`. The tier, model and effort live in the router (`routes.json`,
-edited with `aicli route`). Without a class or a `--tool`, aicli
-exits 2.
+or `resolve`. The tier, model and effort live in the router (`aicli.toml`'s
+defaults, overridden live by `aicli route`). Without a class or a `--tool`,
+aicli exits 2.
 
 ## Config
 
@@ -98,11 +98,26 @@ aicli reads the first config that exists:
 2. `~/.config/aicli/aicli.toml`
 3. `aicli.toml` in this repo (the defaults)
 
-`aicli.toml` holds the backends and the default classes. `routes.json`,
-next to it (or at `$AICLI_ROUTES`), holds live overrides: class changes and
-client routes. Edit it with `aicli route ...` or from a UI; saves go through
-a symlink to the real file, so a deployment can keep its routes in its own
-repo.
+`aicli.toml` holds the backends and the default classes and clients - the
+one thing `git pull` ever changes. The live switchboard is a separate,
+untracked state file, `~/.local/state/aicli/routes.json` (or `$AICLI_ROUTES`,
+or `routes_file` in the config): it holds only what `aicli route ...` or a
+UI actually changed - a changed field of a default class/client, or a whole
+client row added there - laid over the toml defaults field by field. A class
+or client not in `aicli.toml` keeps its override even if a field of it is
+later pointless; a field override for a class/client that was *removed* from
+`aicli.toml` is ignored (and `aicli routes` marks it stale) unless the state
+file's row has enough of its own to stand alone.
+
+Writes are diff-only and never touch `aicli.toml`: `aicli route set-class`/
+`set-client` save only the fields that now differ from the toml default,
+and drop a field from the state file the moment it is set back to that
+default. `aicli route reset-class NAME [--field F]` / `reset-client NAME
+[--field F]` drop one field's override, or the whole row's, without ever
+writing to `aicli.toml`. `aicli route remove-client NAME` is for a client
+row that was added from the state file, not a default one - edit
+`aicli.toml` to drop a default client. Two writers at once (a UI and `aicli
+route`) never race: every write is atomic (temp file + rename).
 
 ### Fallback
 
@@ -114,9 +129,16 @@ per tier. agy meters its Claude models apart from Gemini, so the shipped
 chain is: Claude plan → Claude through agy → Gemini 3.8 through agy.
 
 - An unknown reading counts as room. A probe that times out never moves work.
-- `run` probes with a short timeout. When that probe fails, it uses the last
-  good reading of the last 30 minutes, kept in `~/.local/state/aicli/quota.json`
-  (`$AICLI_QUOTA_CACHE`). `aicli usage` refreshes that file.
+- Quota is read only when a fallback decision needs it: a class with no
+  `fallback` step never probes and never waits, on `run` or `resolve`.
+  `run` probes with a short timeout when a fallback decision needs one; when
+  that probe fails, it uses the last good reading of the last 30 minutes,
+  kept in `~/.local/state/aicli/quota.json` (`$AICLI_QUOTA_CACHE`).
+- `--meta-out`, `resolve --json` and the usage log use that cached reading if
+  one exists (from a fallback decision in the same call, or an earlier
+  probe) and leave `quota` out of their output otherwise - they never start a
+  probe of their own. Only `resolve --quota`, `aicli usage` and `aicli
+  fallback` force a live probe.
 - A caller that pins `--tool` built that CLI's own flags, so `run` never
   moves it to another CLI. Such a caller asks `aicli resolve --tool T --json`
   first and builds for the `tool` and `model` it returns. A fallback to a
@@ -137,7 +159,9 @@ chain is: Claude plan → Claude through agy → Gemini 3.8 through agy.
 | `aicli routes [--json]` | Show the routing table |
 | `aicli route set-class NAME --tool T [--tier ...]` | Change a class's route |
 | `aicli route set-client ID [--class C] [--tool T] [--tier ...] [--effort E] [--model M]` | Route one client. `--model` is the only place a model is pinned: name the client `ID@CLASS` to pin it for one class |
-| `aicli route remove-client ID` | Drop a client's route |
+| `aicli route reset-class NAME [--field F]` | Drop a class's override (one field, or all of it), back to `aicli.toml` |
+| `aicli route reset-client ID [--field F]` | Same, for a default client's override |
+| `aicli route remove-client ID` | Drop a client row that was added from the state file (not a default one) |
 
 `opts` are `--client ID`, `--class NAME`, `--tool` and `--no-fallback`.
 

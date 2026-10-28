@@ -456,6 +456,26 @@ class RoutingTests(unittest.TestCase):
                                  capture_output=True, text=True, env=env)
             self.assertEqual(res.returncode, 0)
 
+    def test_route_reset_class_and_client(self):
+        with tempfile.TemporaryDirectory() as d:
+            config_path, _ = make_config(Path(d))
+            routes_path = Path(d) / "routes.json"
+            env = {**os.environ, "AICLI_CONFIG": str(config_path), "AICLI_ROUTES": str(routes_path)}
+
+            subprocess.run([sys.executable, str(AICLI), "route", "set-class", "maintenance",
+                            "--tool", "claude", "--tier", "deep"], capture_output=True, text=True, env=env, check=True)
+            self.assertIn("maintenance", json.loads(routes_path.read_text())["classes"])
+
+            res = subprocess.run([sys.executable, str(AICLI), "route", "reset-class", "maintenance"],
+                                 capture_output=True, text=True, env=env)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertNotIn("maintenance", json.loads(routes_path.read_text()).get("classes", {}))
+
+            # Reset of a row with no override reports failure, not a crash.
+            res = subprocess.run([sys.executable, str(AICLI), "route", "reset-client", "pjm:nothing"],
+                                 capture_output=True, text=True, env=env)
+            self.assertEqual(res.returncode, 1)
+
     def test_route_set_client_rejects_unknown_class(self):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d))
@@ -676,6 +696,92 @@ class RoutingTests(unittest.TestCase):
             loaded = aicli.load_routes(routes_path=routes_file)
             self.assertEqual(loaded["optiplex_projects"], ["pjm", "homelab", "farah"])
             self.assertIn("c1", loaded["clients"])
+
+    def test_load_routes_merges_client_and_optiplex_defaults_from_toml(self):
+        config = {
+            "classes": {"maintenance": {"tool": "agy", "tier": "low"}},
+            "clients": {"pjm:maint": {"class": "maintenance"}},
+            "optiplex_projects": ["pjm", "homelab"],
+        }
+        with tempfile.TemporaryDirectory() as d:
+            routes_file = Path(d) / "routes.json"  # never written: no override yet
+            loaded = aicli.load_routes(config, routes_path=routes_file)
+        self.assertEqual(loaded["clients"]["pjm:maint"], {"class": "maintenance"})
+        self.assertEqual(loaded["optiplex_projects"], ["pjm", "homelab"])
+
+    def test_apply_route_override_writes_only_the_diff(self):
+        config = {"classes": {"maintenance": {"tool": "agy", "tier": "low", "description": "d"}}}
+        with tempfile.TemporaryDirectory() as d:
+            routes_file = Path(d) / "routes.json"
+            aicli.apply_route_override("classes", "maintenance", {"tool": "claude", "tier": "low"},
+                                        config=config, routes_path=routes_file)
+            saved = json.loads(routes_file.read_text())
+            # Only the field that actually changed is written - not `tier`,
+            # not `description`, and never the merged row.
+            self.assertEqual(saved["classes"]["maintenance"], {"tool": "claude"})
+
+    def test_apply_route_override_drops_override_back_at_default(self):
+        config = {"classes": {"maintenance": {"tool": "agy", "tier": "low"}}}
+        with tempfile.TemporaryDirectory() as d:
+            routes_file = Path(d) / "routes.json"
+            aicli.apply_route_override("classes", "maintenance", {"tool": "claude"},
+                                        config=config, routes_path=routes_file)
+            self.assertIn("maintenance", json.loads(routes_file.read_text())["classes"])
+            # Setting it back to the toml default removes the override entirely.
+            aicli.apply_route_override("classes", "maintenance", {"tool": "agy"},
+                                        config=config, routes_path=routes_file)
+            self.assertNotIn("maintenance", json.loads(routes_file.read_text()).get("classes", {}))
+
+    def test_apply_route_override_writes_a_new_row_in_full(self):
+        config = {"classes": {"maintenance": {"tool": "agy", "tier": "low"}}}
+        with tempfile.TemporaryDirectory() as d:
+            routes_file = Path(d) / "routes.json"
+            merged = aicli.apply_route_override("clients", "pjm:new", {"class": "maintenance", "tool": "claude"},
+                                                 config=config, routes_path=routes_file)
+            self.assertEqual(merged, {"class": "maintenance", "tool": "claude"})
+            self.assertEqual(json.loads(routes_file.read_text())["clients"]["pjm:new"],
+                              {"class": "maintenance", "tool": "claude"})
+
+    def test_reset_route_override_drops_whole_row(self):
+        config = {"classes": {"maintenance": {"tool": "agy", "tier": "low"}}}
+        with tempfile.TemporaryDirectory() as d:
+            routes_file = Path(d) / "routes.json"
+            aicli.apply_route_override("classes", "maintenance", {"tool": "claude", "tier": "deep"},
+                                        config=config, routes_path=routes_file)
+            self.assertTrue(aicli.reset_route_override("classes", "maintenance", config=config, routes_path=routes_file))
+            self.assertNotIn("maintenance", json.loads(routes_file.read_text()).get("classes", {}))
+            loaded = aicli.load_routes(config, routes_path=routes_file)
+            self.assertEqual(loaded["classes"]["maintenance"], {"tool": "agy", "tier": "low"})
+
+    def test_reset_route_override_drops_one_field(self):
+        config = {"classes": {"maintenance": {"tool": "agy", "tier": "low"}}}
+        with tempfile.TemporaryDirectory() as d:
+            routes_file = Path(d) / "routes.json"
+            aicli.apply_route_override("classes", "maintenance", {"tool": "claude", "tier": "deep"},
+                                        config=config, routes_path=routes_file)
+            self.assertTrue(aicli.reset_route_override("classes", "maintenance", config=config,
+                                                         routes_path=routes_file, field="tier"))
+            self.assertEqual(json.loads(routes_file.read_text())["classes"]["maintenance"], {"tool": "claude"})
+
+    def test_reset_route_override_no_override_reports_false(self):
+        with tempfile.TemporaryDirectory() as d:
+            routes_file = Path(d) / "routes.json"
+            self.assertFalse(aicli.reset_route_override("classes", "maintenance", routes_path=routes_file))
+
+    def test_stale_override_reported_for_a_vanished_default(self):
+        config = {"classes": {"maintenance": {"tool": "agy", "tier": "low"}}}
+        with tempfile.TemporaryDirectory() as d:
+            routes_file = Path(d) / "routes.json"
+            # An override for a class that no longer exists in aicli.toml: a
+            # field-only override, not a whole added row.
+            aicli.save_routes({"classes": {"retired-class": {"tier": "deep"}}}, routes_path=routes_file)
+            overridden, stale = aicli._overridden_names(config, routes_path=routes_file)
+            self.assertIn("retired-class", overridden["classes"])
+            self.assertIn("retired-class", stale["classes"])
+            # Still applied if it is a whole added row (has its own `tool`).
+            aicli.save_routes({"clients": {"pjm:gone": {"tool": "agy"}}}, routes_path=routes_file)
+            _, stale2 = aicli._overridden_names(config, routes_path=routes_file)
+            self.assertNotIn("pjm:gone", stale2["clients"])
 
 
 if __name__ == "__main__":
@@ -912,6 +1018,68 @@ class FallbackCliTests(unittest.TestCase):
         self.assertEqual(data["classes"]["standard-dev"]["state"], "fallback")
         self.assertEqual(data["classes"]["standard-dev"]["effective_model"], "gemini-4-argon-medium")
         self.assertEqual(data["classes"]["deep-spec"]["state"], "blocked")
+
+
+class NoProbeWithoutFallbackTests(unittest.TestCase):
+    """A class with no `fallback` never starts a quota probe (the fake CLIs
+    record every `/usage` call they are asked for through FAKE_CLI_USAGE_CALLS);
+    only `resolve --quota`, `usage` and `fallback` force one."""
+
+    def _run(self, *args, env_extra=None):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            config_path, _ = make_config(d)
+            calls = d / "usage_calls.log"
+            res = subprocess.run(
+                [sys.executable, str(AICLI), *args], capture_output=True, text=True,
+                env={**os.environ, "AICLI_CONFIG": str(config_path),
+                     "AICLI_USAGE_LOG": str(d / "usage.jsonl"), "AICLI_QUOTA_CACHE": str(d / "quota.json"),
+                     "FAKE_CLI_USAGE_CALLS": str(calls), **(env_extra or {})},
+            )
+            probed = calls.read_text().splitlines() if calls.exists() else []
+        return res, probed
+
+    def test_run_deep_spec_has_no_fallback_and_never_probes(self):
+        res, probed = self._run("run", "--class", "deep-spec", "--", "-p", "hi")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(probed, [])
+
+    def test_run_standard_dev_has_a_fallback_and_probes(self):
+        res, probed = self._run("run", "--class", "standard-dev", "--", "-p", "hi")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("claude", probed)
+
+    def test_meta_out_absent_when_no_fallback_and_no_cache(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            config_path, _ = make_config(d)
+            meta_file = d / "run.meta.json"
+            res = subprocess.run(
+                [sys.executable, str(AICLI), "run", "--class", "deep-spec", "--meta-out", str(meta_file),
+                 "--", "-p", "hi"],
+                capture_output=True, text=True,
+                env={**os.environ, "AICLI_CONFIG": str(config_path), "AICLI_USAGE_LOG": str(d / "usage.jsonl"),
+                     "AICLI_QUOTA_CACHE": str(d / "quota.json")},
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertNotIn("quota", json.loads(meta_file.read_text()))
+
+    def test_resolve_json_without_quota_flag_never_probes(self):
+        res, probed = self._run("resolve", "--class", "deep-spec", "--json")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(probed, [])
+        self.assertNotIn("quota", json.loads(res.stdout))
+
+    def test_resolve_quota_flag_forces_a_probe(self):
+        res, probed = self._run("resolve", "--class", "deep-spec", "--quota", "--json")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("claude", probed)
+        self.assertIn("quota", json.loads(res.stdout))
+
+    def test_usage_command_always_probes(self):
+        res, probed = self._run("usage", "--json")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("claude", probed)
 
 
 class AuthCliTests(unittest.TestCase):

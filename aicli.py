@@ -182,45 +182,147 @@ def _strip_dashdash(args):
 
 # ---- routing layer ---------------------------------------------------------
 
+DEFAULT_ROUTES_PATH = DEFAULT_USAGE_LOG.with_name("routes.json")
+
+
 def default_routes_path(config=None):
     if os.environ.get("AICLI_ROUTES"):
         return Path(os.environ["AICLI_ROUTES"])
     if config and "routes_file" in config:
         return Path(os.path.expanduser(config["routes_file"]))
-    config_file = Path(os.environ.get("AICLI_CONFIG") or default_config_path())
-    return config_file.with_name("routes.json")
+    return DEFAULT_ROUTES_PATH
+
+
+def _default_sections(config):
+    """The (classes, clients, optiplex_projects) defaults from aicli.toml, each a
+    fresh copy so a caller can merge overrides into it without mutating `config`."""
+    classes, clients = {}, {}
+    for section, out in (("classes", classes), ("clients", clients)):
+        if config and isinstance(config.get(section), dict):
+            for name, d in config[section].items():
+                if isinstance(d, dict):
+                    out[name] = dict(d)
+    optiplex_projects = [str(x) for x in config.get("optiplex_projects", [])] if config else []
+    return classes, clients, optiplex_projects
+
+
+def _read_state_file(routes_file):
+    """The untracked state file's own content (overrides only, never merged
+    with the defaults) - what a diff-only write reads before changing one row."""
+    if not routes_file.is_file():
+        return {}
+    try:
+        with open(routes_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"aicli: warning: could not read {routes_file}: {e}", file=sys.stderr)
+        return {}
 
 
 def load_routes(config=None, routes_path=None):
     routes_file = Path(routes_path) if routes_path else default_routes_path(config)
-    # The [classes.*] tables in aicli.toml are the one source of the defaults;
-    # routes.json (the live switchboard, e.g. homelab's cockpit) is layered over them.
-    classes = {}
-    if config and isinstance(config.get("classes"), dict):
-        for name, d in config["classes"].items():
+    # The [classes.*]/[clients.*] tables in aicli.toml are the one source of the
+    # defaults; the untracked state file (the live switchboard, e.g. homelab's
+    # cockpit) is layered over them, field by field.
+    classes, clients, optiplex_projects = _default_sections(config)
+    state = _read_state_file(routes_file)
+    if isinstance(state.get("classes"), dict):
+        for name, d in state["classes"].items():
             if isinstance(d, dict):
-                classes[name] = dict(d)
-    clients = {}
-
-    optiplex_projects = []
-    if routes_file.is_file():
-        try:
-            with open(routes_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data.get("classes"), dict):
-                for name, d in data["classes"].items():
-                    if isinstance(d, dict):
-                        classes.setdefault(name, {}).update(d)
-            if isinstance(data.get("clients"), dict):
-                for name, d in data["clients"].items():
-                    if isinstance(d, dict):
-                        clients.setdefault(name, {}).update(d)
-            if isinstance(data.get("optiplex_projects"), list):
-                optiplex_projects = [str(x) for x in data["optiplex_projects"]]
-        except (OSError, json.JSONDecodeError) as e:
-            print(f"aicli: warning: could not read {routes_file}: {e}", file=sys.stderr)
+                classes.setdefault(name, {}).update(d)
+    if isinstance(state.get("clients"), dict):
+        for name, d in state["clients"].items():
+            if isinstance(d, dict):
+                clients.setdefault(name, {}).update(d)
+    if isinstance(state.get("optiplex_projects"), list):
+        optiplex_projects = [str(x) for x in state["optiplex_projects"]]
 
     return {"classes": classes, "clients": clients, "optiplex_projects": optiplex_projects}
+
+
+def _overridden_names(config=None, routes_path=None):
+    """(overridden classes, overridden clients, stale classes, stale clients):
+    which rows carry a state-file override, and which of those overrides refer
+    to a row no longer in aicli.toml (ignored by load_routes unless it is a
+    whole added row)."""
+    routes_file = Path(routes_path) if routes_path else default_routes_path(config)
+    state = _read_state_file(routes_file)
+    default_classes, default_clients, _ = _default_sections(config)
+    overridden = {"classes": set(), "clients": set()}
+    stale = {"classes": set(), "clients": set()}
+    for section, defaults in (("classes", default_classes), ("clients", default_clients)):
+        for name, d in (state.get(section) or {}).items():
+            if not isinstance(d, dict):
+                continue
+            overridden[section].add(name)
+            if name not in defaults and not _is_full_row(section, d):
+                stale[section].add(name)
+    return overridden, stale
+
+
+def _is_full_row(section, d):
+    """True when `d` (a state-file row for a name absent from aicli.toml) has
+    enough to stand on its own, so it is an added row rather than a stale
+    leftover field-override for a deleted default."""
+    if section == "clients":
+        return bool(d.get("class") or d.get("tool"))
+    return bool(d.get("tool"))
+
+
+def _diff_from_default(default, merged):
+    """The fields of `merged` that differ from `default` - the one row of a
+    diff-only write. Empty once every field has been set back to its default."""
+    return {k: v for k, v in merged.items() if default.get(k) != v}
+
+
+def apply_route_override(section, name, updates, config=None, routes_path=None):
+    """Merge `updates` into `name`'s row in `section` ("classes"/"clients") and
+    write only the resulting diff from aicli.toml's default for that row into
+    the untracked state file - never the merged result. A row absent from
+    aicli.toml is written in full (there is nothing to diff against); setting
+    every field of a default row back to its default drops the override."""
+    routes_file = Path(routes_path) if routes_path else default_routes_path(config)
+    state = _read_state_file(routes_file)
+    default_classes, default_clients, _ = _default_sections(config)
+    defaults = default_classes if section == "classes" else default_clients
+
+    state.setdefault(section, {})
+    default_row = defaults.get(name, {})
+    current_override = state[section].get(name) or {}
+    merged = {**default_row, **current_override, **updates}
+
+    if name in defaults:
+        diff = _diff_from_default(default_row, merged)
+        if diff:
+            state[section][name] = diff
+        else:
+            state[section].pop(name, None)
+    else:
+        state[section][name] = merged
+
+    save_routes(state, config, routes_path=routes_file)
+    return merged
+
+
+def reset_route_override(section, name, config=None, routes_path=None, field=None):
+    """Drop `name`'s override in `section` - one `field` of it, or the whole
+    row when `field` is None - from the state file, leaving aicli.toml's
+    default (or, for a row not in aicli.toml, every other field) untouched.
+    True when something was actually dropped."""
+    routes_file = Path(routes_path) if routes_path else default_routes_path(config)
+    state = _read_state_file(routes_file)
+    row = (state.get(section) or {}).get(name)
+    if not isinstance(row, dict):
+        return False
+    if field is None:
+        del state[section][name]
+    elif field in row:
+        del row[field]
+    else:
+        return False
+    save_routes(state, config, routes_path=routes_file)
+    return True
 
 
 def save_routes(routes, config=None, routes_path=None):
@@ -1334,6 +1436,14 @@ def build_parser():
     p_del_cli = route_sub.add_parser("remove-client")
     p_del_cli.add_argument("name")
 
+    p_reset_cls = route_sub.add_parser("reset-class", help="drop a class's override, back to aicli.toml")
+    p_reset_cls.add_argument("name")
+    p_reset_cls.add_argument("--field", help="drop only this field; omit to drop the whole override")
+
+    p_reset_cli = route_sub.add_parser("reset-client", help="drop a default client's override, back to aicli.toml")
+    p_reset_cli.add_argument("name")
+    p_reset_cli.add_argument("--field", help="drop only this field; omit to drop the whole override")
+
     p_auth = sub.add_parser("auth", help="manage and check CLI authentication")
     auth_sub = p_auth.add_subparsers(dest="auth_command", required=True)
     p_auth_status = auth_sub.add_parser("status", help="check authentication status of CLIs")
@@ -1426,8 +1536,12 @@ def cmd_resolve(args, config):
         "fallback": fallback,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    if args.quota or args.json:
-        res["quota"] = quota(tool)
+    if args.quota:
+        res["quota"] = quota(tool)  # forces a live probe
+    elif args.json:
+        cached = quota.cached(tool)  # never probes
+        if cached is not None:
+            res["quota"] = cached
 
     if args.json:
         print(json.dumps(res, indent=2))
@@ -1454,14 +1568,35 @@ def _run_fallback(args, config, tool, tier, quota, workload_class=None, routes=N
     return (fallback["tool"] if fallback else tool), fallback
 
 
+def _cached_quota_only(tool):
+    """The on-disk cached quota reading for `tool`, or None when there is
+    none. Never probes: a run whose class has no fallback step never waits on
+    one just to log a number nothing uses for a decision."""
+    hit = _read_quota_cache().get(tool)
+    if not isinstance(hit, dict) or not isinstance(hit.get("result"), dict):
+        return None
+    out = {**hit["result"], "cached_at": datetime.fromtimestamp(hit["at"], timezone.utc).isoformat()}
+    if hit.get("next_ok_at"):
+        out["next_ok_at"] = hit["next_ok_at"]
+    return out
+
+
 def _quota_reader(config):
-    """quota(tool), probing each tool at most once."""
+    """quota(tool) probes live (for a fallback decision), each tool at most
+    once. quota.cached(tool) returns that same reading when a fallback
+    decision already probed this tool, else the on-disk cache only - it never
+    starts a probe of its own."""
     seen = {}
 
     def quota(tool):
         if tool not in seen:
             seen[tool] = get_tool_quota(config, tool)
         return seen[tool]
+
+    def cached(tool):
+        return seen[tool] if tool in seen else _cached_quota_only(tool)
+
+    quota.cached = cached
     return quota
 
 
@@ -1493,7 +1628,9 @@ def cmd_run(args, config):
     # the tier, and agy's tier model can drop the effort (model_sets_effort).
     model = _flag_value(argv, config[tool].get("model_flag", "")) or "unknown"
     effort = _flag_value(argv, config[tool].get("effort_flag", ""))
-    quota_res = quota(tool)
+    # Never probes on its own: the fallback decision above already probed when
+    # one was needed, so a class with no fallback never waits here either.
+    quota_res = quota.cached(tool)
 
     if getattr(args, "meta_out", None):
         meta = {
@@ -1505,7 +1642,7 @@ def cmd_run(args, config):
             "effort": effort,
             "fallback": fallback,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "quota": quota_res,
+            **({"quota": quota_res} if quota_res is not None else {}),
         }
         meta_path = Path(args.meta_out)
         meta_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1519,7 +1656,7 @@ def cmd_run(args, config):
         "tool": tool,
         "tier": tier,
         "model": model,
-        "quota": quota_res,
+        **({"quota": quota_res} if quota_res is not None else {}),
         **({"fallback": fallback} if fallback else {}),
     }
     if sys.stdout.isatty():
@@ -1655,18 +1792,21 @@ def cmd_routes(args, config):
     routes = load_routes(config)
     classes = routes["classes"]
     clients = routes["clients"]
+    overridden, stale = _overridden_names(config)
     if args.json:
         out = {"classes": {}, "clients": {}}
         for name, c in classes.items():
             tool = c.get("tool", "claude")
             tier = c.get("tier", "default")
             model = config.get(tool, {}).get("tiers", {}).get(tier, "")
-            out["classes"][name] = {**c, "model": model}
+            out["classes"][name] = {**c, "model": model, "overridden": name in overridden["classes"],
+                                     "stale": name in stale["classes"]}
         for name, c in clients.items():
             tool = c.get("tool")
             tier = c.get("tier")
             model = config.get(tool, {}).get("tiers", {}).get(tier, "") if tool and tier else ""
-            out["clients"][name] = {**c, "model": model}
+            out["clients"][name] = {**c, "model": model, "overridden": name in overridden["clients"],
+                                     "stale": name in stale["clients"]}
         print(json.dumps(out, indent=2))
         return 0
 
@@ -1679,7 +1819,8 @@ def cmd_routes(args, config):
         eff_str = f", effort: {effort}" if effort else ""
         fb_steps = normalize_fallback_steps(c.get("fallback"))
         fb_str = f", fallback: {fb_steps[0]['tool']}/{fb_steps[0].get('model', '')}" if fb_steps else ", fallback: none"
-        print(f"  {name:20} -> {tool:6} (tier: {tier:7}, model: {model}{eff_str}{fb_str})")
+        tag = " [stale override]" if name in stale["classes"] else (" [overridden]" if name in overridden["classes"] else "")
+        print(f"  {name:20} -> {tool:6} (tier: {tier:7}, model: {model}{eff_str}{fb_str}){tag}")
         if c.get("description"):
             print(f"    {c['description']} [{c.get('frequency', '')}]")
     if clients:
@@ -1690,58 +1831,69 @@ def cmd_routes(args, config):
                 route_str += f", tool: {c['tool']}"
             if c.get("tier"):
                 route_str += f", tier: {c['tier']}"
-            print(f"  {name:20} -> {route_str}")
+            tag = " [stale override]" if name in stale["clients"] else ""
+            print(f"  {name:20} -> {route_str}{tag}")
     return 0
 
 
 def cmd_route(args, config):
-    routes = load_routes(config)
     if args.route_command == "set-class":
-        if args.name not in routes["classes"]:
-            routes["classes"][args.name] = {"description": "", "frequency": ""}
-        cls_entry = routes["classes"][args.name]
-        cls_entry["tool"] = args.tool
-        cls_entry["tier"] = args.tier
+        updates = {"tool": args.tool, "tier": args.tier}
         if getattr(args, "effort", None):
-            cls_entry["effort"] = args.effort
+            updates["effort"] = args.effort
         if getattr(args, "no_fallback", False):
-            cls_entry["fallback"] = None
+            updates["fallback"] = None
         elif getattr(args, "fallback_tool", None) and getattr(args, "fallback_model", None):
             fb = {"tool": args.fallback_tool, "model": args.fallback_model}
             if args.fallback_tool == "agy":
                 fb["group"] = infer_agy_group(args.fallback_model)
-            cls_entry["fallback"] = fb
-        save_routes(routes, config)
+            updates["fallback"] = fb
+        apply_route_override("classes", args.name, updates, config)
         print(f"route updated: class {args.name} -> {args.tool}/{args.tier}")
         return 0
     elif args.route_command == "set-client":
-        if args.workload_class and args.workload_class not in routes["classes"]:
-            known = ", ".join(sorted(routes["classes"]))
+        known_classes = load_routes(config)["classes"]
+        if args.workload_class and args.workload_class not in known_classes:
+            known = ", ".join(sorted(known_classes))
             print(f"aicli: unknown workload class {args.workload_class!r} (known: {known})", file=sys.stderr)
             return 2
-        entry = routes["clients"].setdefault(args.name, {})
+        updates = {}
         if args.workload_class:
-            entry["class"] = args.workload_class
+            updates["class"] = args.workload_class
         if args.tool:
-            entry["tool"] = args.tool
+            updates["tool"] = args.tool
         if args.tier:
-            entry["tier"] = args.tier
+            updates["tier"] = args.tier
         if args.effort:
-            entry["effort"] = args.effort
+            updates["effort"] = args.effort
         if args.model:
-            entry["model"] = args.model
-        save_routes(routes, config)
+            updates["model"] = args.model
+        entry = apply_route_override("clients", args.name, updates, config)
         print(f"route updated: client {args.name} -> {entry}")
         return 0
     elif args.route_command == "remove-client":
-        if args.name in routes["clients"]:
-            del routes["clients"][args.name]
-            save_routes(routes, config)
+        routes_path = default_routes_path(config)
+        state = _read_state_file(routes_path)
+        if args.name in (state.get("clients") or {}):
+            del state["clients"][args.name]
+            save_routes(state, config, routes_path=routes_path)
             print(f"client {args.name} removed from routes")
         else:
             print(f"client {args.name} not in routes", file=sys.stderr)
             return 1
         return 0
+    elif args.route_command == "reset-class":
+        if reset_route_override("classes", args.name, config, field=args.field):
+            print(f"class {args.name} reset" + (f" (field {args.field})" if args.field else ""))
+            return 0
+        print(f"class {args.name} has no override" + (f" for field {args.field}" if args.field else ""), file=sys.stderr)
+        return 1
+    elif args.route_command == "reset-client":
+        if reset_route_override("clients", args.name, config, field=args.field):
+            print(f"client {args.name} reset" + (f" (field {args.field})" if args.field else ""))
+            return 0
+        print(f"client {args.name} has no override" + (f" for field {args.field}" if args.field else ""), file=sys.stderr)
+        return 1
     return 1
 
 

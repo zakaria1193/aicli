@@ -10,6 +10,8 @@ what `aicli run`/`argv`/the service built, without needing a real CLI.
 
 FAKE_CLI_SLEEP, FAKE_CLI_EXIT_CODE and FAKE_CLI_STDERR let a test simulate a
 slow, failing or noisy CLI without touching the argv the service builds.
+FAKE_CLI_USAGE_CALLS, if set, is a file this CLI appends "claude" to every
+time it is asked for `/usage`, so a test can prove whether a probe happened.
 """
 import json
 import os
@@ -39,6 +41,10 @@ elif args[:2] == ["auth", "login"]:
         print("Invalid code", file=sys.stderr)
         sys.exit(1)
 elif args[:2] == ["-p", "/usage"]:
+    calls_log = os.environ.get("FAKE_CLI_USAGE_CALLS")
+    if calls_log:
+        with open(calls_log, "a") as f:
+            f.write("claude\n")
     print(Path(os.environ.get("FAKE_CLAUDE_USAGE") or Path(__file__).with_name("usage-claude.txt")).read_text(), end="")
 elif "--output-format" in args and "stream-json" in args:
     for line in Path(__file__).with_name("stream-claude.jsonl").read_text().splitlines():
