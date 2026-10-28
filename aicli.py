@@ -1794,7 +1794,7 @@ def cmd_routes(args, config):
     clients = routes["clients"]
     overridden, stale = _overridden_names(config)
     if args.json:
-        out = {"classes": {}, "clients": {}}
+        out = {"classes": {}, "clients": {}, "optiplex_projects": routes.get("optiplex_projects") or []}
         for name, c in classes.items():
             tool = c.get("tool", "claude")
             tier = c.get("tier", "default")

@@ -79,6 +79,8 @@ def _toml_val(value):
 def _to_toml(cfg):
     # Minimal hand-rolled TOML writer - good enough for this flat shape.
     lines = [f"usage_timeout = {cfg['usage_timeout']}"]
+    if "optiplex_projects" in cfg:
+        lines.append(f"optiplex_projects = {_toml_val(cfg['optiplex_projects'])}")
     for tool in ("claude", "agy"):
         t = cfg[tool]
         lines.append(f"\n[{tool}]")
@@ -422,6 +424,18 @@ class RoutingTests(unittest.TestCase):
             data = json.loads(result.stdout)
             self.assertIn("maintenance", data["classes"])
             self.assertEqual(data["classes"]["maintenance"]["tool"], "agy")
+
+    def test_routes_command_json_carries_optiplex_projects(self):
+        """pjm's cockpit badges OptiPlex projects off this (homelab-0019): no caller reads
+        routes.json directly any more, so the merged list must be reachable from the CLI."""
+        with tempfile.TemporaryDirectory() as d:
+            config_path, config = make_config(Path(d))
+            config["optiplex_projects"] = ["pjm", "homelab"]
+            config_path.write_text(_to_toml(config))
+            result = run_aicli("routes", "--json", config_path=config_path)
+            self.assertEqual(result.returncode, 0)
+            data = json.loads(result.stdout)
+            self.assertEqual(data["optiplex_projects"], ["pjm", "homelab"])
 
     def test_route_set_and_remove(self):
         with tempfile.TemporaryDirectory() as d:
