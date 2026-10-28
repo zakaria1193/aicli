@@ -1137,7 +1137,11 @@ def auth_status(config, tool=None):
                 out[t] = {"authenticated": False, "detail": f"Check failed: {e}"}
         elif t == "agy":
             try:
-                p = subprocess.run([bin_path, "-p", "/usage"], capture_output=True, text=True, timeout=5, check=False)
+                hit = _read_quota_cache().get(t)
+                if hit and isinstance(hit.get("result"), dict) and hit["result"].get("state") == OK:
+                    out[t] = {"authenticated": True, "detail": "Authenticated"}
+                    continue
+                p = subprocess.run([bin_path, "-p", "/usage"], capture_output=True, text=True, timeout=12, check=False)
                 if p.returncode == 0 and ("Limit" in p.stdout or "Quota" in p.stdout or "Gemini" in p.stdout):
                     out[t] = {"authenticated": True, "detail": "Authenticated"}
                 elif "fake" in bin_path:
