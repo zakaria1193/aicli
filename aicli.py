@@ -513,7 +513,15 @@ def _claude_usage(config, timeout):
     if result.returncode != 0:
         return {"state": UNKNOWN, "detail": "claude -p /usage failed", "bars": {}}
 
-    return parse_claude_usage(result.stdout)
+    res = parse_claude_usage(result.stdout)
+    if res.get("state") != OK:
+        try:
+            auth_proc = subprocess.run([bin_path, "auth", "status"], capture_output=True, text=True, timeout=3)
+            if auth_proc.returncode != 0 or '"loggedIn":false' in auth_proc.stdout.replace(" ", ""):
+                return {"state": "down", "detail": "Claude OAuth session expired / not logged in", "bars": {}}
+        except Exception:
+            pass
+    return res
 
 
 # `agy -p "/usage"` prints one line per (model group, period), either tab-separated

@@ -26,7 +26,9 @@ if stderr_text:
     print(stderr_text, file=sys.stderr)
 
 args = sys.argv[1:]
-if args[:2] == ["-p", "/usage"]:
+if args[:2] == ["auth", "status"]:
+    print(json.dumps({"loggedIn": True, "authMethod": "oauth"}))
+elif args[:2] == ["-p", "/usage"]:
     print(Path(os.environ.get("FAKE_CLAUDE_USAGE") or Path(__file__).with_name("usage-claude.txt")).read_text(), end="")
 elif "--output-format" in args and "stream-json" in args:
     for line in Path(__file__).with_name("stream-claude.jsonl").read_text().splitlines():

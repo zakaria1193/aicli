@@ -304,6 +304,40 @@ def chat_completion_chunk(model_id, content=None, finish_reason=None):
     }
 
 
+_health_cache = {"at": 0.0, "status": 200, "body": b"ok"}
+_health_lock = threading.Lock()
+
+
+def check_cli_health(config):
+    """Probes backend CLIs (Claude, AGY) to ensure they are logged in and ready."""
+    now = time.time()
+    with _health_lock:
+        if now - _health_cache["at"] < 10.0:
+            return _health_cache["status"], _health_cache["body"]
+
+    errors = []
+    # 1. Claude: verify OAuth session via CLI subprocess
+    claude_bin = aicli.resolve_bin(config, "claude")
+    if claude_bin:
+        try:
+            p = subprocess.run([claude_bin, "auth", "status"], capture_output=True, text=True, timeout=3)
+            if p.returncode != 0 or '"loggedIn":false' in p.stdout.replace(" ", ""):
+                errors.append("Claude OAuth session expired / not logged in")
+        except Exception as e:
+            errors.append(f"Claude auth check error: {e}")
+
+    with _health_lock:
+        _health_cache["at"] = now
+        if errors:
+            msg = "degraded: " + "; ".join(errors)
+            _health_cache["status"] = 503
+            _health_cache["body"] = msg.encode("utf-8")
+        else:
+            _health_cache["status"] = 200
+            _health_cache["body"] = b"ok"
+        return _health_cache["status"], _health_cache["body"]
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "aicli-ai/1.0"
 
@@ -354,9 +388,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/healthz":
-            body = b"ok"
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
+            status, body = check_cli_health(self.server.aicli_config)
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
