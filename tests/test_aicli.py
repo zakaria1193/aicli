@@ -188,12 +188,15 @@ class ArgvTests(unittest.TestCase):
         argv = json.loads(result.stdout)
         self.assertEqual(argv, [str(FAKE_CLI / "fake-claude"), "--model", "claude-sonnet-5"])
 
-    def test_argv_tier_and_effort(self):
+    def test_argv_tier_and_effort_come_from_the_router(self):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d))
-            result = run_aicli(
-                "argv", "--tool", "agy", "--tier", "deep", "--effort", "high", "--json",
-                config_path=config_path,
+            routes_path = Path(d) / "routes.json"
+            routes_path.write_text(json.dumps({"classes": {"t": {"tool": "agy", "tier": "deep", "effort": "high"}}}))
+            result = subprocess.run(
+                [sys.executable, str(AICLI), "argv", "--class", "t", "--json"],
+                capture_output=True, text=True,
+                env={**os.environ, "AICLI_CONFIG": str(config_path), "AICLI_ROUTES": str(routes_path)},
             )
         argv = json.loads(result.stdout)
         self.assertEqual(
@@ -206,10 +209,12 @@ class ArgvTests(unittest.TestCase):
         # the tier's model names the effort, aicli must not add one.
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d), agy={"model_sets_effort": True})
-            result = run_aicli(
-                "argv", "--tool", "agy", "--tier", "low", "--effort", "medium", "--json",
-                "--", "--effort=high", "-p", "hi",
-                config_path=config_path,
+            routes_path = Path(d) / "routes.json"
+            routes_path.write_text(json.dumps({"classes": {"t": {"tool": "agy", "tier": "low", "effort": "medium"}}}))
+            result = subprocess.run(
+                [sys.executable, str(AICLI), "argv", "--class", "t", "--json", "--", "--effort=high", "-p", "hi"],
+                capture_output=True, text=True,
+                env={**os.environ, "AICLI_CONFIG": str(config_path), "AICLI_ROUTES": str(routes_path)},
             )
         argv = json.loads(result.stdout)
         self.assertEqual(
@@ -221,8 +226,8 @@ class ArgvTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d), agy={"model_sets_effort": True})
             result = run_aicli(
-                "argv", "--tool", "agy", "--effort", "high", "--json",
-                "--", "--model=custom",
+                "argv", "--tool", "agy", "--json",
+                "--", "--effort", "high", "--model=custom",
                 config_path=config_path,
             )
         argv = json.loads(result.stdout)
@@ -268,11 +273,13 @@ class ArgvTests(unittest.TestCase):
             f"{FAKE_CLI / 'fake-claude'} --model claude-sonnet-5",
         )
 
-    def test_argv_unknown_tier_exits_2(self):
+    def test_callers_cannot_pass_tier_effort_or_model(self):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d))
-            result = run_aicli("argv", "--tool", "claude", "--tier", "bogus", config_path=config_path)
-        self.assertEqual(result.returncode, 2)
+            for flag, value in (("--tier", "low"), ("--effort", "high"), ("--model", "x")):
+                for cmd in ("argv", "run", "resolve"):
+                    result = run_aicli(cmd, "--tool", "claude", flag, value, config_path=config_path)
+                    self.assertEqual(result.returncode, 2, (cmd, flag))
 
     def test_argv_binary_not_found_exits_1(self):
         with tempfile.TemporaryDirectory() as d:
@@ -291,14 +298,14 @@ class RunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d))
             result = run_aicli(
-                "run", "--tool", "agy", "--tier", "low", "--", "-p", "hello",
+                "run", "--tool", "agy", "--", "-p", "hello",
                 config_path=config_path,
             )
         self.assertEqual(result.returncode, 0)
         argv = json.loads(result.stdout)
         self.assertEqual(
             argv,
-            [str(FAKE_CLI / "fake-agy"), "--model", "gemini-3.8-flash-low", "-p", "hello"],
+            [str(FAKE_CLI / "fake-agy"), "--model", "gemini-3.8-flash-high", "-p", "hello"],
         )
 
 
@@ -500,7 +507,7 @@ class RoutingTests(unittest.TestCase):
             config_path, _ = make_config(Path(d))
             meta_file = Path(d) / "run.meta.json"
             res = subprocess.run(
-                [sys.executable, str(AICLI), "run", "--tool", "claude", "--effort", "high",
+                [sys.executable, str(AICLI), "run", "--tool", "claude",
                  "--meta-out", str(meta_file), "--", "--model", "claude-opus-5-5", "-p", "hi"],
                 capture_output=True, text=True,
                 env={**os.environ, "AICLI_CONFIG": str(config_path)},
@@ -508,7 +515,6 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(res.returncode, 0, res.stderr)
             data = json.loads(meta_file.read_text())
             self.assertEqual(data["model"], "claude-opus-5-5")
-            self.assertEqual(data["effort"], "high")
 
     def _run_logged(self, d, *args, tool="claude"):
         config_path, _ = make_config(Path(d))
