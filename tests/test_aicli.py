@@ -643,6 +643,21 @@ class RoutingTests(unittest.TestCase):
             tool, tier, effort, cls = aicli.resolve_route(config, client="pjm:maintainer:homelab:routine", routes=routes)
             self.assertEqual((tool, tier, cls), ("agy", "low", "maintenance"))
 
+    def test_client_and_class_pin_a_model(self):
+        with tempfile.TemporaryDirectory() as d:
+            config_path, config = make_config(Path(d))
+            routes = {
+                "classes": config["classes"],
+                "clients": {
+                    "pjm:auto-spec@deep-spec": {"model": "claude-opus-5-5"},
+                    "pjm:auto-spec": {"model": "claude-sonnet-5"},
+                },
+                "optiplex_projects": [],
+            }
+            self.assertEqual(aicli.route_model(routes, "pjm:p-0001:auto-spec", "deep-spec"), "claude-opus-5-5")
+            self.assertEqual(aicli.route_model(routes, "pjm:p-0001:auto-spec", "standard-dev"), "claude-sonnet-5")
+            self.assertIsNone(aicli.route_model(routes, "pjm:p-0001:auto-plan", "deep-spec"))
+
     def test_optiplex_projects_load_and_save(self):
         with tempfile.TemporaryDirectory() as d:
             routes_file = Path(d) / "routes.json"

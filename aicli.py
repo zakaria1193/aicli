@@ -240,6 +240,43 @@ def save_routes(routes, config=None, routes_path=None):
         raise
 
 
+def _client_keys(client):
+    """The `clients` keys that can match `client`, most specific first."""
+    keys = [client]
+    if ":" in client:
+        parts = client.split(":")
+        # e.g. pjm:p-0001:auto-execute -> try pjm:auto-execute
+        if len(parts) >= 3:
+            keys.append(f"{parts[0]}:{parts[-1]}")
+        if len(parts) >= 4:
+            keys.append(f"{parts[0]}:{parts[1]}:{parts[-1]}")
+        if len(parts) >= 3:
+            keys.append(f"{parts[0]}:{parts[1]}")
+    return keys
+
+
+def find_client_entry(clients, client, workload_class=None):
+    """The routes.json `clients` entry for `client`. With a class, a `<key>@<class>` entry
+    (e.g. `pjm:auto-spec@deep-spec`) is tried before `<key>`, so the same client can be
+    routed one way for one class and another way for the next."""
+    if not client:
+        return None
+    keys = _client_keys(client)
+    if workload_class:
+        keys = [k for key in keys for k in (f"{key}@{workload_class}", key)]
+    for key in keys:
+        if key in clients:
+            return clients[key]
+    return None
+
+
+def route_model(routes, client, workload_class):
+    """The `model` a routes.json client entry pins for this client and class, else None.
+    The one place a model override lives: callers pass a client and a class, never --model."""
+    entry = find_client_entry((routes or {}).get("clients") or {}, client, workload_class)
+    return (entry or {}).get("model") or None
+
+
 def resolve_route(config, client=None, workload_class=None, requested_tool=None,
                   requested_tier=None, requested_effort=None, routes=None):
     if routes is None:
@@ -252,19 +289,7 @@ def resolve_route(config, client=None, workload_class=None, requested_tool=None,
     target_tier = None
     target_effort = None
 
-    client_entry = None
-    if client:
-        if client in clients:
-            client_entry = clients[client]
-        elif ":" in client:
-            parts = client.split(":")
-            # e.g. pjm:p-0001:auto-execute -> try pjm:auto-execute
-            if len(parts) >= 3 and f"{parts[0]}:{parts[-1]}" in clients:
-                client_entry = clients[f"{parts[0]}:{parts[-1]}"]
-            elif len(parts) >= 4 and f"{parts[0]}:{parts[1]}:{parts[-1]}" in clients:
-                client_entry = clients[f"{parts[0]}:{parts[1]}:{parts[-1]}"]
-            elif len(parts) >= 3 and f"{parts[0]}:{parts[1]}" in clients:
-                client_entry = clients[f"{parts[0]}:{parts[1]}"]
+    client_entry = find_client_entry(clients, client, workload_class)
 
     if client_entry:
         if not resolved_class and "class" in client_entry:
@@ -1125,6 +1150,7 @@ def build_parser():
     p_set_cli.add_argument("--class", dest="workload_class")
     p_set_cli.add_argument("--tool", choices=TOOLS)
     p_set_cli.add_argument("--tier", choices=TIERS)
+    p_set_cli.add_argument("--model", help="pin this model for the client (name it `<client>@<class>` to pin it for one class only)")
 
     p_del_cli = route_sub.add_parser("remove-client")
     p_del_cli.add_argument("name")
@@ -1161,7 +1187,8 @@ def cmd_argv(args, config):
     tool, fallback = _run_fallback(args, config, tool, tier, _quota_reader(config),
                                    workload_class=resolved_class, routes=routes, effort=effort)
     eff = fallback.get("effort") if fallback else effort
-    argv = build_argv(config, tool, tier, eff, extra, model=(fallback or {}).get("model"))
+    pinned = None if fallback else route_model(routes, args.client, resolved_class)
+    argv = build_argv(config, tool, tier, eff, extra, model=(fallback or {}).get("model") or pinned)
     if argv is None:
         print(f"{tool} CLI not found", file=sys.stderr)
         return 1
@@ -1192,7 +1219,9 @@ def cmd_resolve(args, config):
     if fallback:
         tool = fallback["tool"]
         effort = fallback.get("effort")
-    model = (fallback or {}).get("model") or config.get(tool, {}).get("tiers", {}).get(tier, "unknown")
+    pinned = None if fallback else route_model(routes, args.client, resolved_class)
+    model = ((fallback or {}).get("model") or pinned
+             or config.get(tool, {}).get("tiers", {}).get(tier, "unknown"))
     res = {
         "client": args.client,
         "class": resolved_class,
@@ -1263,7 +1292,8 @@ def cmd_run(args, config):
     tool, fallback = _run_fallback(args, config, tool, tier, quota,
                                    workload_class=resolved_class, routes=routes, effort=effort)
     eff = fallback.get("effort") if fallback else effort
-    argv = build_argv(config, tool, tier, eff, extra, model=(fallback or {}).get("model"))
+    pinned = None if fallback else route_model(routes, args.client, resolved_class)
+    argv = build_argv(config, tool, tier, eff, extra, model=(fallback or {}).get("model") or pinned)
     if argv is None:
         print(f"{tool} CLI not found", file=sys.stderr)
         return 1
@@ -1504,6 +1534,8 @@ def cmd_route(args, config):
             entry["tool"] = args.tool
         if args.tier:
             entry["tier"] = args.tier
+        if args.model:
+            entry["model"] = args.model
         save_routes(routes, config)
         print(f"route updated: client {args.name} -> {entry}")
         return 0
