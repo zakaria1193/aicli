@@ -97,6 +97,14 @@ class HealthAndModelsTests(ServerTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, b"ok")
 
+    def test_auth_status_endpoint(self):
+        status, body = self.get("/v1/auth/status")
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertIn("claude", data)
+        self.assertIn("agy", data)
+        self.assertTrue(data["claude"]["authenticated"])
+
     def test_models_lists_eight_ids(self):
         status, body = self.get("/v1/models")
         self.assertEqual(status, 200)

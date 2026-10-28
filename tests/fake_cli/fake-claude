@@ -28,6 +28,16 @@ if stderr_text:
 args = sys.argv[1:]
 if args[:2] == ["auth", "status"]:
     print(json.dumps({"loggedIn": True, "authMethod": "oauth"}))
+elif args[:2] == ["auth", "login"]:
+    print("Opening browser to sign in…")
+    print("If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=fake-id&state=fake-state")
+    sys.stdout.flush()
+    code = sys.stdin.readline().strip()
+    if code == "valid-code":
+        sys.exit(0)
+    else:
+        print("Invalid code", file=sys.stderr)
+        sys.exit(1)
 elif args[:2] == ["-p", "/usage"]:
     print(Path(os.environ.get("FAKE_CLAUDE_USAGE") or Path(__file__).with_name("usage-claude.txt")).read_text(), end="")
 elif "--output-format" in args and "stream-json" in args:

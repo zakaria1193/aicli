@@ -315,16 +315,11 @@ def check_cli_health(config):
         if now - _health_cache["at"] < 10.0:
             return _health_cache["status"], _health_cache["body"]
 
+    st = aicli.auth_status(config)
     errors = []
-    # 1. Claude: verify OAuth session via CLI subprocess
-    claude_bin = aicli.resolve_bin(config, "claude")
-    if claude_bin:
-        try:
-            p = subprocess.run([claude_bin, "auth", "status"], capture_output=True, text=True, timeout=3)
-            if p.returncode != 0 or '"loggedIn":false' in p.stdout.replace(" ", ""):
-                errors.append("Claude OAuth session expired / not logged in")
-        except Exception as e:
-            errors.append(f"Claude auth check error: {e}")
+    for tool, info in st.items():
+        if not info.get("authenticated"):
+            errors.append(f"{tool}: {info.get('detail')}")
 
     with _health_lock:
         _health_cache["at"] = now
@@ -395,6 +390,9 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/v1/auth/status":
+            self._send_json(200, aicli.auth_status(self.server.aicli_config))
+            return
         if self.path == "/v1/models":
             if not self._authorized():
                 self._send_error(401, "missing or wrong API key", code="authentication_error")
@@ -407,6 +405,36 @@ class Handler(BaseHTTPRequestHandler):
         self._send_error(404, "not found")
 
     def do_POST(self):
+        if self.path.startswith("/v1/auth/"):
+            if not self._authorized():
+                self._send_error(401, "missing or wrong API key", code="authentication_error")
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self._send_error(400, "invalid Content-Length")
+                return
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                payload = json.loads(raw) if raw else {}
+            except ValueError:
+                self._send_error(400, "invalid JSON body")
+                return
+            tool = payload.get("tool", "claude") if isinstance(payload, dict) else "claude"
+            if self.path == "/v1/auth/start":
+                res = aicli.start_login(self.server.aicli_config, tool)
+                self._send_json(200 if res.get("ok") else 500, res)
+                return
+            elif self.path == "/v1/auth/submit":
+                code = payload.get("code", "") if isinstance(payload, dict) else ""
+                res = aicli.submit_code(self.server.aicli_config, tool, code)
+                self._send_json(200 if res.get("ok") else 400, res)
+                return
+            elif self.path == "/v1/auth/cancel":
+                res = aicli.cancel_login(self.server.aicli_config, tool)
+                self._send_json(200, res)
+                return
+
         if self.path != "/v1/chat/completions":
             self._send_error(404, "not found")
             return

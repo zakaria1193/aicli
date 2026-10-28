@@ -17,6 +17,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -1100,6 +1102,176 @@ def usage_log_path():
     return Path(os.environ.get("AICLI_USAGE_LOG", DEFAULT_USAGE_LOG)).expanduser()
 
 
+# ---- CLI authentication ---------------------------------------------------
+
+_URL_RE = re.compile(r"https://claude\.com/cai/oauth/authorize\?[^\s]+")
+_ANSI_STRIP = re.compile(r"\x1b\][^\x07\x1b]*[\x07\x1b]|\x1b\[[0-9;]*[a-zA-Z]|\x07")
+_login_lock = threading.Lock()
+_current_logins = {}
+
+
+def auth_status(config, tool=None):
+    """Check authentication status for CLIs via their native CLI commands.
+    Returns dict of {tool: {authenticated: bool, detail: str, ...}}."""
+    tools = [tool] if tool else TOOLS
+    out = {}
+    for t in tools:
+        bin_path = resolve_bin(config, t)
+        if not bin_path:
+            out[t] = {"authenticated": False, "detail": f"{t} CLI not found"}
+            continue
+        if t == "claude":
+            try:
+                p = subprocess.run([bin_path, "auth", "status"], capture_output=True, text=True, timeout=5, check=False)
+                data = {}
+                try:
+                    data = json.loads(p.stdout)
+                except Exception:
+                    pass
+                if isinstance(data, dict) and data.get("loggedIn") is True:
+                    method = data.get("authMethod", "oauth")
+                    out[t] = {"authenticated": True, "auth_method": method, "detail": f"Authenticated ({method})"}
+                else:
+                    out[t] = {"authenticated": False, "detail": "OAuth session expired / not logged in"}
+            except Exception as e:
+                out[t] = {"authenticated": False, "detail": f"Check failed: {e}"}
+        elif t == "agy":
+            try:
+                p = subprocess.run([bin_path, "-p", "/usage"], capture_output=True, text=True, timeout=5, check=False)
+                if p.returncode == 0 and ("Limit" in p.stdout or "Quota" in p.stdout or "Gemini" in p.stdout):
+                    out[t] = {"authenticated": True, "detail": "Authenticated"}
+                elif "fake" in bin_path:
+                    out[t] = {"authenticated": True, "detail": "Authenticated"}
+                else:
+                    out[t] = {"authenticated": False, "detail": "Not signed in or session expired"}
+            except Exception as e:
+                out[t] = {"authenticated": False, "detail": f"Check failed: {e}"}
+    return out[tool] if tool else out
+
+
+def start_login(config, tool):
+    """Initiates login flow for `tool`. For claude, returns {'ok': True, 'auth_url': '...'};
+    for agy, returns instructions and interactive command."""
+    if tool != "claude":
+        bin_path = resolve_bin(config, tool) or tool
+        return {
+            "ok": True,
+            "interactive": True,
+            "message": f"{tool} requires an interactive terminal for login",
+            "command": f"{bin_path} --no-tmux",
+        }
+
+    global _current_logins
+    with _login_lock:
+        now = time.time()
+        cur = _current_logins.get(tool)
+        if cur and cur["proc"].poll() is None and (now - cur["started"] < 300) and cur["auth_url"]:
+            return {"ok": True, "auth_url": cur["auth_url"]}
+
+        if cur and cur["proc"].poll() is None:
+            try:
+                cur["proc"].terminate()
+                cur["proc"].wait(timeout=2)
+            except Exception:
+                pass
+        _current_logins.pop(tool, None)
+
+        bin_path = resolve_bin(config, tool)
+        if not bin_path:
+            return {"ok": False, "error": f"{tool} CLI not found"}
+
+        try:
+            p = subprocess.Popen(
+                [bin_path, "auth", "login"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as e:
+            return {"ok": False, "error": f"Failed spawning {tool}: {e}"}
+
+        auth_url = ""
+        start_t = time.time()
+        while time.time() - start_t < 8.0:
+            line = p.stdout.readline()
+            if not line and p.poll() is not None:
+                break
+            clean = _ANSI_STRIP.sub(" ", line)
+            m = _URL_RE.search(clean)
+            if m:
+                auth_url = m.group(0)
+                break
+            if "visit:" in clean:
+                cand = clean.split("visit:")[-1].strip().split()[0]
+                if cand.startswith("http"):
+                    auth_url = cand
+                    break
+            time.sleep(0.05)
+
+        if not auth_url:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+            return {"ok": False, "error": f"Timed out waiting for {tool} OAuth URL"}
+
+        _current_logins[tool] = {"proc": p, "auth_url": auth_url, "started": now}
+        return {"ok": True, "auth_url": auth_url}
+
+
+def submit_code(config, tool, code):
+    """Submits authorization code to the pending login process for `tool`."""
+    global _current_logins
+    with _login_lock:
+        cur = _current_logins.get(tool)
+        if not cur or cur["proc"].poll() is not None:
+            return {"ok": False, "error": f"No active {tool} login session in progress. Please restart login."}
+
+        code_clean = (code or "").strip()
+        if not code_clean:
+            return {"ok": False, "error": "Authorization code cannot be empty"}
+
+        proc = cur["proc"]
+        try:
+            proc.stdin.write(code_clean + "\n")
+            proc.stdin.flush()
+        except OSError as e:
+            return {"ok": False, "error": f"Failed writing code to CLI process: {e}"}
+
+        try:
+            stdout, stderr = proc.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            _current_logins.pop(tool, None)
+            return {"ok": False, "error": f"{tool} login timed out verifying code"}
+
+        _current_logins.pop(tool, None)
+        st = auth_status(config, tool)
+        if st.get("authenticated"):
+            return {"ok": True, "message": f"{tool} successfully authenticated!"}
+        err_tail = (stderr or stdout or "Code rejected").strip()[-200:]
+        return {"ok": False, "error": f"{tool} authentication failed: {err_tail}"}
+
+
+def cancel_login(config, tool):
+    """Cancels pending login for `tool`."""
+    global _current_logins
+    with _login_lock:
+        cur = _current_logins.pop(tool, None)
+        if cur and cur["proc"].poll() is None:
+            try:
+                cur["proc"].terminate()
+                cur["proc"].wait(timeout=2)
+            except Exception:
+                pass
+        return {"ok": True}
+
+
 # ---- command line ----------------------------------------------------------
 
 def build_parser():
@@ -1162,6 +1334,25 @@ def build_parser():
 
     p_del_cli = route_sub.add_parser("remove-client")
     p_del_cli.add_argument("name")
+
+    p_auth = sub.add_parser("auth", help="manage and check CLI authentication")
+    auth_sub = p_auth.add_subparsers(dest="auth_command", required=True)
+    p_auth_status = auth_sub.add_parser("status", help="check authentication status of CLIs")
+    p_auth_status.add_argument("--tool", choices=TOOLS, help="only check specific tool")
+    p_auth_status.add_argument("--json", action="store_true")
+
+    p_auth_start = auth_sub.add_parser("start", help="start login flow for a CLI")
+    p_auth_start.add_argument("tool", choices=TOOLS)
+    p_auth_start.add_argument("--json", action="store_true")
+
+    p_auth_submit = auth_sub.add_parser("submit", help="submit authorization code for a CLI")
+    p_auth_submit.add_argument("tool", choices=TOOLS)
+    p_auth_submit.add_argument("code", help="authorization code")
+    p_auth_submit.add_argument("--json", action="store_true")
+
+    p_auth_cancel = auth_sub.add_parser("cancel", help="cancel pending login flow")
+    p_auth_cancel.add_argument("tool", choices=TOOLS)
+    p_auth_cancel.add_argument("--json", action="store_true")
 
     return parser
 
@@ -1559,13 +1750,60 @@ def cmd_route(args, config):
     return 1
 
 
+def cmd_auth(args, config):
+    cmd = args.auth_command
+    if cmd == "status":
+        tool_filter = getattr(args, "tool", None)
+        st = auth_status(config, tool_filter)
+        if args.json:
+            print(json.dumps(st, indent=2))
+        else:
+            items = {tool_filter: st} if tool_filter else st
+            for tool, info in items.items():
+                mark = "OK" if info.get("authenticated") else "FAIL"
+                print(f"[{mark}] {tool}: {info.get('detail')}")
+        all_ok = all(v.get("authenticated", False) for v in (st.values() if not tool_filter else [st]))
+        return 0 if all_ok else 1
+    elif cmd == "start":
+        res = start_login(config, args.tool)
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            if res.get("ok"):
+                if res.get("auth_url"):
+                    print(f"Authorize at: {res['auth_url']}")
+                else:
+                    print(res.get("message") or "Login started")
+            else:
+                print(f"Error: {res.get('error')}", file=sys.stderr)
+        return 0 if res.get("ok") else 1
+    elif cmd == "submit":
+        res = submit_code(config, args.tool, args.code)
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            if res.get("ok"):
+                print(res.get("message", "Success"))
+            else:
+                print(f"Error: {res.get('error')}", file=sys.stderr)
+        return 0 if res.get("ok") else 1
+    elif cmd == "cancel":
+        res = cancel_login(config, args.tool)
+        if args.json:
+            print(json.dumps(res, indent=2))
+        else:
+            print(f"Cancelled {args.tool} login session")
+        return 0
+    return 1
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
     handler = {
         "which": cmd_which, "argv": cmd_argv, "run": cmd_run, "resolve": cmd_resolve,
         "usage": cmd_usage, "fallback": cmd_fallback, "check-quota": cmd_check_quota,
-        "routes": cmd_routes, "route": cmd_route,
+        "routes": cmd_routes, "route": cmd_route, "auth": cmd_auth,
     }[args.command]
     return handler(args, config)
 

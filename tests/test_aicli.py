@@ -906,3 +906,28 @@ class FallbackCliTests(unittest.TestCase):
         self.assertEqual(data["classes"]["standard-dev"]["state"], "fallback")
         self.assertEqual(data["classes"]["standard-dev"]["effective_model"], "gemini-4-argon-medium")
         self.assertEqual(data["classes"]["deep-spec"]["state"], "blocked")
+
+
+class AuthCliTests(unittest.TestCase):
+    def test_auth_status_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            config_path, _ = make_config(Path(d))
+            env = {**os.environ, "AICLI_CONFIG": str(config_path)}
+            r = subprocess.run(
+                [sys.executable, str(AICLI), "auth", "status", "--json"],
+                capture_output=True, text=True, env=env,
+            )
+            data = json.loads(r.stdout)
+            self.assertIn("claude", data)
+            self.assertIn("agy", data)
+            self.assertTrue(data["claude"]["authenticated"])
+
+    def test_programmatic_auth_flow(self):
+        cfg = {"claude": {"bin": str(FAKE_CLI / "fake-claude")}}
+        res_start = aicli.start_login(cfg, "claude")
+        self.assertTrue(res_start.get("ok"))
+        self.assertIn("https://claude.com/cai/oauth/authorize", res_start.get("auth_url", ""))
+
+        res_sub = aicli.submit_code(cfg, "claude", "valid-code")
+        self.assertTrue(res_sub.get("ok"))
+        self.assertIn("authenticated", res_sub.get("message", ""))
