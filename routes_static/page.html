@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__HEADING__ · __TITLE__</title>
+__HEAD__
+<link rel="stylesheet" href="__STATIC__/routes.css">
+</head>
+<body class="__BODY_CLASS__">
+<div class="wrap">
+  <header>
+    <h1>🧭 __HEADING__</h1>
+    <div class="top-right">
+      <button type="button" class="btn secondary" onclick="loadRoutes(true)">↻ Refresh</button>
+      <span id="dirtyTag" class="dirty-tag" style="display: none;">Unsaved changes</span>
+      <a class="back" href="__BACK_HREF__">&larr; __BACK_LABEL__</a>
+    </div>
+  </header>
+  <p class="lede">__LEDE__</p>
+
+  <div id="msgBanner" class="msg-banner" style="display: none;"></div>
+  <div id="quotaWarningBanner" class="msg-banner err" style="display: none;"></div>
+
+  __EXTRA_TOP__
+
+  <!-- Plan meters, compact: the AI Usage page has their history -->
+  <div class="quota-strip">
+    <div id="quotaStrip" class="quota-strip-items"><span class="muted">Reading plan usage…</span></div>
+    __USAGE_LINK__
+  </div>
+
+  <div class="fb-bar">
+    <label class="fb-switch" title="Show every class's fallback, and edit them in place"><input type="checkbox" id="fbToggle" onchange="setFallbackView(this.checked)"> Fallbacks</label>
+    <span id="fbBulk" class="fb-bulk">
+      Set all <strong class="fb-count">0 classes</strong> to
+      <select class="form-control fb-bulk-tool" onchange="renderFallbackBulk()"><option value="agy">agy</option><option value="claude">claude</option></select>
+      <select class="form-control fb-bulk-model"></select>
+      <button type="button" class="btn secondary small" onclick="applyFallbackToAll()">Apply</button>
+      <button type="button" class="btn secondary small" onclick="clearFallbackOfAll()">Clear all</button>
+    </span>
+  </div>
+
+  <div class="view-bar">
+    <div class="seg" role="tablist" aria-label="View">
+      <button type="button" role="tab" data-view="board" onclick="setView('board')">Board</button>
+      <button type="button" role="tab" data-view="list" onclick="setView('list')">List</button>
+    </div>
+    <div class="legend">
+      <span><i class="lg primary"></i>class route</span>
+      <span><i class="lg fallback"></i>fallback</span>
+      <span><i class="lg member"></i>client &rarr; class</span>
+      <span><i class="lg override"></i>client override</span>
+    </div>
+  </div>
+
+  <!-- Switchboard: clients -> classes -> tiers/models, drawn by ai_routes_board.js -->
+  <div id="boardView" class="board-view">
+    <p class="board-hint">Drag from a dot onto a card to rewire, or tap a dot and then tap the card. Tap a cable to remove it; tap a class or client to edit it.</p>
+    <div class="board-scroll">
+      <div id="board" class="board"><span class="muted">Loading switchboard…</span></div>
+    </div>
+  </div>
+
+  <div id="listView">
+  <!-- Workload Classes Table -->
+  <div class="section-title">
+    <span>Workload Classes &amp; Per-Class Fallback</span>
+    <span style="font-size: 12px; font-weight: 400; color: var(--muted);">Fallback activates once the primary plan meter is full and retests the primary after it resets</span>
+  </div>
+  <div class="table-container">
+    <table class="routes-table" id="classesTable">
+      <thead>
+        <tr>
+          <th style="width: 150px;">Class</th>
+          <th>Description &amp; Frequency</th>
+          <th style="width: 220px;">Primary Route (Tool / Tier / Effort)</th>
+          <th style="width: 240px;">Fallback Route (or None)</th>
+          <th style="width: 240px;">Live State &amp; Effective Model</th>
+        </tr>
+      </thead>
+      <tbody id="classesTbody">
+        <tr><td colspan="5" style="text-align: center; color: var(--muted); padding: 20px;">Loading routing table...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Registered Clients & Overrides Table -->
+  <div class="section-title">
+    <span>Registered Clients &amp; Overrides</span>
+    <button type="button" class="btn secondary small" onclick="addClientRow()">+ Add Client Override</button>
+  </div>
+  <div class="table-container">
+    <table class="routes-table" id="clientsTable">
+      <thead>
+        <tr>
+          <th style="width: 200px;">Client ID</th>
+          <th>Description &amp; Frequency</th>
+          <th style="width: 170px;">Assigned Class</th>
+          <th style="width: 140px;">Override Tool</th>
+          <th style="width: 120px;">Override Tier</th>
+          <th style="width: 190px;">Override Model</th>
+          <th style="width: 90px; text-align: right;">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="clientsTbody">
+        <tr><td colspan="7" style="text-align: center; color: var(--muted); padding: 20px;">No client overrides configured.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- OptiPlex Projects (aicli enabled) -->
+  <div class="section-title unscoped-only">
+    <span>OptiPlex Projects (register / enable / disable)</span>
+    <button type="button" class="btn secondary small" onclick="addProject()">+ Register Project</button>
+  </div>
+  <div class="table-container unscoped-only" style="padding: 14px 18px;">
+    <div id="projectsList" style="display: flex; flex-direction: column; gap: 8px;">
+      <span style="color: var(--muted); font-size: 13px;">Loading projects...</span>
+    </div>
+    <p style="margin: 10px 0 0; font-size: 12px; color: var(--muted);">Disabling or unregistering a project keeps its client IDs and overrides above; re-enabling restores them.</p>
+  </div>
+
+  </div>
+
+  <div class="actions-bar">
+    <button type="button" class="btn secondary" onclick="loadRoutes(false)">Cancel / Discard</button>
+  </div>
+</div>
+
+<!-- The one Save: saves classes, clients and the project registry, wherever you are on the page -->
+<div id="saveToast" class="save-toast" role="status" aria-live="polite"></div>
+<button type="button" id="saveFab" class="save-fab" onclick="saveRoutes()" title="Save all routes" aria-label="Save all routes">
+  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></svg>
+  <span class="save-dot" aria-hidden="true"></span>
+</button>
+
+<datalist id="modelList"></datalist>
+
+
+__EXTRA_BOTTOM__
+<script>window.AICLI_ROUTES = __CONFIG__;</script>
+<script src="__STATIC__/routes.js"></script>
+<script src="__STATIC__/board.js"></script>
+</body>
+</html>

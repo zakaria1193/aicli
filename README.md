@@ -159,6 +159,7 @@ chain is: Claude plan → Claude through agy → Gemini 3.8 through agy.
 | `aicli usage [--json]` | Each subscription's quota bars, from the CLI's `/usage` |
 | `aicli fallback [--json]` | Each fallback chain, its readings and the step in use |
 | `aicli routes [--json]` | Show the routing table |
+| `aicli routes-api get\|save\|page\|static [--scope PREFIX]` | The routing page (`routes_static/`): its data, its saving, its HTML. See [Routing page](#routing-page) |
 | `aicli route set-class NAME --tool T [--tier ...]` | Change a class's route |
 | `aicli route set-client ID [--class C] [--tool T] [--tier ...] [--effort E] [--model M]` | Route one client. `--model` is the only place a model is pinned: name the client `ID@CLASS` to pin it for one class |
 | `aicli route reset-class NAME [--field F]` | Drop a class's override (one field, or all of it), back to `aicli.toml` |
@@ -177,6 +178,23 @@ Details worth knowing:
   symlinks `claude` there can't make aicli call itself.
 - `usage` exits 0 even when a backend's state is `unknown`; the state is in
   the output.
+
+## Routing page
+
+`routes_static/` is the page that shows and edits `routes.json`: a Board (clients, classes, tools and models,
+joined by cables) and a List for phones, every class's fallback, and one **Fallbacks** switch that shows the
+fallback of every class in view and sets or clears them all at once. `routes_api.py` is its data and its saving,
+and `aicli routes-api page` prints its HTML, so a host serves it without copying code:
+
+- `aicli routes-api page --scope pjm: --api /api/ai-routes --static /routes_static` prints the page.
+- `aicli routes-api get [--scope P] [--live]` is what the page loads (`--live` probes the CLIs for the plan meters,
+  otherwise the last readings are used). `aicli routes-api save [--scope P]` takes the page's JSON on stdin.
+- The host serves the folder `aicli routes-api static` prints at the `--static` URL.
+- `--scope pjm:` limits the view to clients starting with `pjm:` and the classes they run as. A save can only touch those
+  clients and classes; a class also used by other clients says so.
+
+pjm serves it at `/routes` this way. Homelab's cockpit keeps its own copy for now and can switch to this one
+(it adds its CLI sign-in strip through `__EXTRA_TOP__`).
 
 ## HTTP API
 
