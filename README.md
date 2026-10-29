@@ -131,9 +131,12 @@ whichever CLI the router picked, so a caller never knows or names the CLI.
 |---|---|---|
 | `--prompt=TEXT` / `--prompt-file F` | the prompt (a leading `-` is safe) | `-p` prompt |
 | `--system-prompt-file F` | `--append-system-prompt-file` | text put in front of the prompt |
-| `--oneshot` | `-p`: print the answer and exit | always one-shot |
+| `--oneshot` | `-p`: print the answer and exit | `-p` |
+| `--interactive` | no `-p`: stays open | `-i`: stays open |
+| neither | no `-p` (hooks end it) | `-p` (runs to completion) |
 | `--output-format json\|stream-json` | `-p --output-format F`; `stream-json` also adds `--verbose --include-partial-messages` | `--output-format F` |
-| `--session-id ID` / `--resume ID` / `--name N` | same flags | ignored (no sessions) |
+| `--session-id ID` / `--resume ID` / `--name N` | same flags | ignored |
+| `--conversation ID` | ignored | `--conversation ID` (an id agy printed in its stream); the system prompt is not added again |
 | `--settings F` (hooks) / `--mcp-config F` | `--settings`, `--strict-mcp-config --mcp-config` | ignored |
 | `--permission-mode dontAsk\|auto` | `--permission-mode` | ignored (agy's own) |
 

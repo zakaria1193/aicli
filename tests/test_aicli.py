@@ -343,6 +343,23 @@ class JobTests(unittest.TestCase):
             str(FAKE_CLI / "fake-agy"), "--model", "gemini-3.8-flash-high",
             "-p", "rules\n\ndo it", "--output-format", "json"])
 
+    def test_interactive_agy_stays_open_and_a_conversation_is_continued(self):
+        result = self.argv("t-agy", "--interactive", "--prompt", "hi")
+        self.assertEqual(json.loads(result.stdout)[-2:], ["-i", "hi"])
+        result = self.argv("t-agy", "--output-format", "stream-json", "--conversation", "c1",
+                           "--system-prompt-file", "{d}/p.md", "--prompt", "again", files={"p.md": "rules"})
+        argv = json.loads(result.stdout)
+        self.assertEqual(argv[argv.index("-p") + 1], "again")            # no persona on a continued conversation
+        self.assertEqual(argv[argv.index("--conversation") + 1], "c1")
+
+    def test_claude_ignores_a_conversation_and_interactive_means_no_dash_p(self):
+        argv = json.loads(self.argv("t-claude", "--interactive", "--conversation", "c1", "--prompt", "hi").stdout)
+        self.assertNotIn("-p", argv)
+        self.assertNotIn("--conversation", argv)
+
+    def test_oneshot_and_interactive_conflict(self):
+        self.assertEqual(self.argv("t-claude", "--oneshot", "--interactive").returncode, 2)
+
     def test_prompt_file(self):
         result = self.argv("t-agy", "--prompt-file", "{d}/q.md", files={"q.md": "from file"})
         self.assertEqual(json.loads(result.stdout)[-2:], ["-p", "from file"])

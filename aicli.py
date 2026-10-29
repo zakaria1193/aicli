@@ -116,8 +116,8 @@ def infer_agy_group(model):
 
 OUTPUT_FORMATS = ("json", "stream-json")
 PERMISSION_MODES = ("dontAsk", "auto")
-JOB_FIELDS = ("prompt", "system_prompt_file", "session_id", "resume", "name", "settings",
-              "mcp_config", "permission_mode", "output_format", "oneshot")
+JOB_FIELDS = ("prompt", "system_prompt_file", "session_id", "resume", "conversation", "name", "settings",
+              "mcp_config", "permission_mode", "output_format", "oneshot", "interactive")
 
 
 class JobError(ValueError):
@@ -138,6 +138,8 @@ def job_from_args(args):
     job = {k: v for k, v in job.items() if v}
     if job.get("session_id") and job.get("resume"):
         raise JobError("pass either --session-id or --resume, not both")
+    if job.get("oneshot") and job.get("interactive"):
+        raise JobError("pass either --oneshot or --interactive, not both")
     return job or None
 
 
@@ -174,19 +176,25 @@ def _job_claude(job, extra):
 
 
 def _job_agy(job, extra):
-    """agy is one-shot (`-p`). It has no append-prompt, session, hook, MCP or permission
-    flags, so the system prompt joins the prompt and those fields are left out: a caller
-    that depends on them reads the exit code and the output instead."""
+    """agy runs to completion (`-p`) unless the job is interactive (`-i`: it stays open for a
+    human). It has no append-prompt, session, hook, MCP or permission flags, so the system
+    prompt joins the prompt and those fields are left out: a caller that depends on them reads
+    the exit code and the output instead. A conversation agy already has (`--conversation`)
+    got the system prompt when it began, so it is not added again."""
     prompt = job.get("prompt") or ""
-    if job.get("system_prompt_file"):
+    if job.get("system_prompt_file") and not job.get("conversation"):
         try:
             system = Path(job["system_prompt_file"]).read_text(encoding="utf-8").rstrip()
         except OSError as e:
             raise JobError(f"cannot read --system-prompt-file: {e}")
         prompt = f"{system}\n\n{prompt}" if prompt else system
-    out = ["-p", prompt]
+    if not prompt and job.get("interactive"):
+        prompt = "The human opened your window. Say in one line that you are ready."
+    out = ["-i" if job.get("interactive") else "-p", prompt]
     if job.get("output_format"):
         out += ["--output-format", job["output_format"]]
+    if job.get("conversation"):
+        out += ["--conversation", job["conversation"]]
     return out + extra
 
 
@@ -1474,12 +1482,14 @@ def build_parser():
         p.add_argument("--system-prompt-file", help="instructions added to the CLI's own (agy: put in front of the prompt)")
         p.add_argument("--session-id", help="start a session with this UUID (agy: ignored)")
         p.add_argument("--resume", help="resume this session (agy: ignored)")
+        p.add_argument("--conversation", help="continue this agy conversation, an id agy printed (claude: ignored)")
         p.add_argument("--name", help="display name of the session (agy: ignored)")
         p.add_argument("--settings", help="claude settings file, hooks included (agy: ignored)")
         p.add_argument("--mcp-config", help="MCP servers file, the only ones loaded (agy: ignored)")
         p.add_argument("--permission-mode", choices=PERMISSION_MODES, help="dontAsk or auto (agy: its own)")
         p.add_argument("--output-format", choices=OUTPUT_FORMATS, help="one-shot output; stream-json prints events as they come")
         p.add_argument("--oneshot", action="store_true", help="print the answer and exit")
+        p.add_argument("--interactive", action="store_true", help="stay open for a human to type into (agy: -i instead of -p)")
 
     p_argv = sub.add_parser("argv")
     add_tool_args(p_argv)
