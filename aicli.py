@@ -1414,6 +1414,25 @@ def build_parser():
     p_routes = sub.add_parser("routes")
     p_routes.add_argument("--json", action="store_true")
 
+    p_rapi = sub.add_parser("routes-api", help="what the routing page loads and saves (routes_static/), as JSON")
+    rapi_sub = p_rapi.add_subparsers(dest="rapi_command", required=True)
+    p_rget = rapi_sub.add_parser("get", help="the page's data: routes, fallbacks, readings")
+    p_rget.add_argument("--scope", default="", help="only clients starting with this prefix (e.g. pjm:)")
+    p_rget.add_argument("--live", action="store_true", help="probe the CLIs now instead of using the last readings")
+    p_rsave = rapi_sub.add_parser("save", help="apply the page's JSON body from stdin")
+    p_rsave.add_argument("--scope", default="", help="only touch clients starting with this prefix")
+    rapi_sub.add_parser("static", help="print the folder holding the page's html, js and css")
+    p_rpage = rapi_sub.add_parser("page", help="print the page's HTML for a host to serve")
+    p_rpage.add_argument("--scope", default="", help="limit the page to clients starting with this prefix")
+    p_rpage.add_argument("--api", default="/api/ai-routes", help="URL the page loads and saves through")
+    p_rpage.add_argument("--static", default="/routes_static", help="URL prefix the host serves the folder at")
+    p_rpage.add_argument("--title", default="", help="the host's name, after the page title")
+    p_rpage.add_argument("--back-href", default="/")
+    p_rpage.add_argument("--back-label", default="Back")
+    p_rpage.add_argument("--lede", default="", help="intro text (HTML)")
+    p_rpage.add_argument("--head", default="", help="extra HTML for <head> (styles)")
+    p_rpage.add_argument("--save-note", default="Saved. aicli reads it on the next run.")
+
     p_route = sub.add_parser("route")
     route_sub = p_route.add_subparsers(dest="route_command", required=True)
     p_set_cls = route_sub.add_parser("set-class")
@@ -1897,6 +1916,32 @@ def cmd_route(args, config):
     return 1
 
 
+def cmd_routes_api(args, config):
+    sys.modules.setdefault("aicli", sys.modules[__name__])  # run as a script: routes_api imports this very module
+    import routes_api
+    if args.rapi_command == "static":
+        print(routes_api.STATIC_DIR)
+        return 0
+    if args.rapi_command == "page":
+        sys.stdout.write(routes_api.render_page(
+            {"api": args.api, "scope": args.scope, "saveNote": args.save_note},
+            title=args.title, back_href=args.back_href, back_label=args.back_label, lede=args.lede,
+            head=args.head or f'<link rel="stylesheet" href="{args.static}/standalone.css">', static=args.static))
+        return 0
+    if args.rapi_command == "get":
+        usage = compute_usage(config) if args.live else routes_api.cached_usage()
+        out = routes_api.payload(config, usage, scope=args.scope)
+    else:
+        try:
+            body = json.load(sys.stdin)
+        except ValueError:
+            print("routes-api save: stdin is not JSON", file=sys.stderr)
+            return 2
+        out = routes_api.save(config, body if isinstance(body, dict) else {}, scope=args.scope)
+    print(json.dumps(out))
+    return 0
+
+
 def cmd_auth(args, config):
     cmd = args.auth_command
     if cmd == "status":
@@ -1950,7 +1995,7 @@ def main(argv=None):
     handler = {
         "which": cmd_which, "argv": cmd_argv, "run": cmd_run, "resolve": cmd_resolve,
         "usage": cmd_usage, "fallback": cmd_fallback, "check-quota": cmd_check_quota,
-        "routes": cmd_routes, "route": cmd_route, "auth": cmd_auth,
+        "routes": cmd_routes, "routes-api": cmd_routes_api, "route": cmd_route, "auth": cmd_auth,
     }[args.command]
     return handler(args, config)
 

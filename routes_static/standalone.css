@@ -1,0 +1,44 @@
+/* The page's base look for a host that has no theme of its own (homelab's
+   cockpit links its theme.css instead): tokens, buttons and badges, light and dark. */
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff; --panel: #ffffff; --raise: #f5f5f7; --border: #d8d8dc;
+  --text: #1d1d1f; --muted: #6e6e73; --faint: #86868b;
+  --accent: #155bd0; --accent-contrast: #ffffff;
+  --up: #1a9c4b; --down: #d53f3f; --warn: #b9770e; --unknown: #86868b;
+  --radius-sm: 6px; --radius: 10px; --radius-pill: 999px;
+  --font: -apple-system, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12151b; --panel: #1b2029; --raise: #262d3a; --border: #2b3240;
+    --text: #e6e9ef; --muted: #97a0b0; --faint: #7a8496;
+    --accent: #5b8def; --accent-contrast: #0b1220;
+    --up: #4ade80; --down: #f87171; --warn: #fbbf24;
+  }
+}
+:root {
+  --up-soft-bg: color-mix(in srgb, var(--up) 12%, transparent);
+  --up-soft-border: color-mix(in srgb, var(--up) 35%, transparent);
+  --down-soft-bg: color-mix(in srgb, var(--down) 12%, transparent);
+  --down-soft-border: color-mix(in srgb, var(--down) 35%, transparent);
+  --warn-soft-bg: color-mix(in srgb, var(--warn) 14%, transparent);
+  --warn-soft-border: color-mix(in srgb, var(--warn) 35%, transparent);
+  --accent-soft-bg: color-mix(in srgb, var(--accent) 10%, transparent);
+  --accent-soft-border: color-mix(in srgb, var(--accent) 35%, transparent);
+  --row-hover: color-mix(in srgb, var(--text) 4%, transparent);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 var(--font); }
+a { color: inherit; }
+button, input, select, textarea { font-family: var(--font); }
+.btn { display: inline-flex; align-items: center; gap: 8px; background: var(--accent); color: var(--accent-contrast);
+  border: none; border-radius: var(--radius-sm); padding: 8px 14px; font: inherit; font-weight: 600; text-decoration: none; cursor: pointer; }
+.btn:hover { filter: brightness(1.08); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn.secondary { background: var(--raise); color: var(--text); border: 1px solid var(--border); }
+.btn.danger { background: var(--down); color: #fff; }
+.btn.small { padding: 4px 10px; font-size: 12px; font-weight: 500; gap: 4px; }
+.badge { font-size: 11px; padding: 2px 7px; border-radius: var(--radius-pill); border: 1px solid var(--border); background: var(--raise); }
+code { font-family: var(--mono); font-size: 0.9em; }
