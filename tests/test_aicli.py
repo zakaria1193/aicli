@@ -61,7 +61,12 @@ def make_config(tmp_dir, **overrides):
     # The real workload classes, so routing tests use what ships.
     with open(ROOT / "aicli.toml", "rb") as f:
         shipped = tomllib.load(f)
-    cfg["classes"] = shipped["classes"]
+    cfg["classes"] = {
+        **shipped["classes"],
+        # one plain class per tool, for tests of the command itself
+        "t-claude": {"tool": "claude", "tier": "default"},
+        "t-agy": {"tool": "agy", "tier": "default"},
+    }
     cfg["fallback"] = shipped["fallback"]
     path = tmp_dir / "aicli.toml"
     path.write_text(_to_toml(cfg))
@@ -186,7 +191,7 @@ class ArgvTests(unittest.TestCase):
     def test_argv_default_tier_adds_model_flag(self):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d))
-            result = run_aicli("argv", "--tool", "claude", "--json", config_path=config_path)
+            result = run_aicli("argv", "--class", "t-claude", "--json", config_path=config_path)
         argv = json.loads(result.stdout)
         self.assertEqual(argv, [str(FAKE_CLI / "fake-claude"), "--model", "claude-sonnet-5"])
 
@@ -228,7 +233,7 @@ class ArgvTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d), agy={"model_sets_effort": True})
             result = run_aicli(
-                "argv", "--tool", "agy", "--json",
+                "argv", "--class", "t-agy", "--json",
                 "--", "--effort", "high", "--model=custom",
                 config_path=config_path,
             )
@@ -239,7 +244,7 @@ class ArgvTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d))
             result = run_aicli(
-                "argv", "--tool", "claude", "--json", "--", "-p", "/usage",
+                "argv", "--class", "t-claude", "--json", "--", "-p", "/usage",
                 config_path=config_path,
             )
         argv = json.loads(result.stdout)
@@ -249,7 +254,7 @@ class ArgvTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d))
             result = run_aicli(
-                "argv", "--tool", "claude", "--json", "--", "--model", "custom-model",
+                "argv", "--class", "t-claude", "--json", "--", "--model", "custom-model",
                 config_path=config_path,
             )
         argv = json.loads(result.stdout)
@@ -260,7 +265,7 @@ class ArgvTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d))
             result = run_aicli(
-                "argv", "--tool", "claude", "--json", "--", "claude", "--session-id", "s1",
+                "argv", "--class", "t-claude", "--json", "--", "claude", "--session-id", "s1",
                 config_path=config_path,
             )
         argv = json.loads(result.stdout)
@@ -269,7 +274,7 @@ class ArgvTests(unittest.TestCase):
     def test_argv_non_default_shell_quoted_line(self):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d))
-            result = run_aicli("argv", "--tool", "claude", config_path=config_path)
+            result = run_aicli("argv", "--class", "t-claude", config_path=config_path)
         self.assertEqual(
             result.stdout.strip(),
             f"{FAKE_CLI / 'fake-claude'} --model claude-sonnet-5",
@@ -280,14 +285,14 @@ class ArgvTests(unittest.TestCase):
             config_path, _ = make_config(Path(d))
             for flag, value in (("--tier", "low"), ("--effort", "high"), ("--model", "x")):
                 for cmd in ("argv", "run", "resolve"):
-                    result = run_aicli(cmd, "--tool", "claude", flag, value, config_path=config_path)
+                    result = run_aicli(cmd, "--class", "t-claude", flag, value, config_path=config_path)
                     self.assertEqual(result.returncode, 2, (cmd, flag))
 
     def test_argv_binary_not_found_exits_1(self):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d), claude={"bin": str(Path(d) / "missing")})
             result = subprocess.run(
-                [sys.executable, str(AICLI), "argv", "--tool", "claude"],
+                [sys.executable, str(AICLI), "argv", "--class", "t-claude"],
                 capture_output=True, text=True,
                 env={**os.environ, "AICLI_CONFIG": str(config_path), "PATH": "/nonexistent"},
             )
@@ -295,12 +300,76 @@ class ArgvTests(unittest.TestCase):
         self.assertIn("claude CLI not found", result.stderr)
 
 
+class JobTests(unittest.TestCase):
+    """The tool-neutral job: a caller names a client and a class, aicli builds the flags."""
+
+    def argv(self, cls, *args, files=None):
+        with tempfile.TemporaryDirectory() as d:
+            config_path, _ = make_config(Path(d))
+            args = [a.replace("{d}", d) if isinstance(a, str) else a for a in args]
+            for name, text in (files or {}).items():
+                (Path(d) / name).write_text(text)
+            result = run_aicli("argv", "--class", cls, "--json", *args, config_path=config_path)
+        return result
+
+    def test_there_is_no_tool_flag(self):
+        for cmd in ("argv", "run", "resolve"):
+            with tempfile.TemporaryDirectory() as d:
+                config_path, _ = make_config(Path(d))
+                result = run_aicli(cmd, "--tool", "claude", "--class", "t-agy", config_path=config_path)
+            self.assertEqual(result.returncode, 2, cmd)
+
+    def test_claude_interactive_job(self):
+        result = self.argv("t-claude", "--session-id", "s1", "--name", "n", "--mcp-config", "m.json",
+                           "--permission-mode", "dontAsk", "--system-prompt-file", "p.md",
+                           "--settings", "s.json", "--prompt", "do it")
+        self.assertEqual(json.loads(result.stdout), [
+            str(FAKE_CLI / "fake-claude"), "--model", "claude-sonnet-5",
+            "--session-id", "s1", "--name", "n", "--strict-mcp-config", "--mcp-config", "m.json",
+            "--permission-mode", "dontAsk", "--append-system-prompt-file", "p.md",
+            "--settings", "s.json", "do it"])
+
+    def test_claude_streaming_job_resumes(self):
+        result = self.argv("t-claude", "--resume", "s1", "--output-format", "stream-json", "--prompt=-hi")
+        self.assertEqual(json.loads(result.stdout), [
+            str(FAKE_CLI / "fake-claude"), "--model", "claude-sonnet-5", "-p", "--output-format", "stream-json",
+            "--verbose", "--include-partial-messages", "--resume", "s1", " -hi"])
+
+    def test_agy_job_is_one_shot_with_the_system_prompt_in_front(self):
+        result = self.argv("t-agy", "--session-id", "s1", "--settings", "s.json", "--mcp-config", "m.json",
+                           "--permission-mode", "auto", "--system-prompt-file", "{d}/p.md",
+                           "--output-format", "json", "--prompt", "do it", files={"p.md": "rules\n"})
+        self.assertEqual(json.loads(result.stdout), [
+            str(FAKE_CLI / "fake-agy"), "--model", "gemini-3.8-flash-high",
+            "-p", "rules\n\ndo it", "--output-format", "json"])
+
+    def test_prompt_file(self):
+        result = self.argv("t-agy", "--prompt-file", "{d}/q.md", files={"q.md": "from file"})
+        self.assertEqual(json.loads(result.stdout)[-2:], ["-p", "from file"])
+
+    def test_prompt_and_prompt_file_conflict(self):
+        result = self.argv("t-agy", "--prompt", "a", "--prompt-file", "{d}/q.md", files={"q.md": "b"})
+        self.assertEqual(result.returncode, 2)
+
+    def test_session_id_and_resume_conflict(self):
+        result = self.argv("t-claude", "--session-id", "a", "--resume", "b", "--prompt", "x")
+        self.assertEqual(result.returncode, 2)
+
+    def test_the_router_not_the_caller_picks_the_cli_for_the_same_job(self):
+        job = ("--prompt", "hi", "--output-format", "json")
+        claude = json.loads(self.argv("t-claude", *job).stdout)
+        agy = json.loads(self.argv("t-agy", *job).stdout)
+        self.assertEqual(claude[0], str(FAKE_CLI / "fake-claude"))
+        self.assertEqual(agy[0], str(FAKE_CLI / "fake-agy"))
+        self.assertIn("-p", agy)
+
+
 class RunTests(unittest.TestCase):
     def test_run_execs_the_fake_cli_with_built_argv(self):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d))
             result = run_aicli(
-                "run", "--tool", "agy", "--", "-p", "hello",
+                "run", "--class", "t-agy", "--", "-p", "hello",
                 config_path=config_path,
             )
         self.assertEqual(result.returncode, 0)
@@ -541,7 +610,7 @@ class RoutingTests(unittest.TestCase):
             config_path, _ = make_config(Path(d))
             meta_file = Path(d) / "run.meta.json"
             res = subprocess.run(
-                [sys.executable, str(AICLI), "run", "--tool", "claude",
+                [sys.executable, str(AICLI), "run", "--class", "t-claude",
                  "--meta-out", str(meta_file), "--", "--model", "claude-opus-5-5", "-p", "hi"],
                 capture_output=True, text=True,
                 env={**os.environ, "AICLI_CONFIG": str(config_path)},
@@ -554,7 +623,7 @@ class RoutingTests(unittest.TestCase):
         config_path, _ = make_config(Path(d))
         usage_log = Path(d) / "usage.jsonl"
         res = subprocess.run(
-            [sys.executable, str(AICLI), "run", "--client", "t:x", "--tool", tool, "--", *args],
+            [sys.executable, str(AICLI), "run", "--client", "t:x", "--class", f"t-{tool}", "--", *args],
             capture_output=True, text=True,
             env={**os.environ, "AICLI_CONFIG": str(config_path), "AICLI_USAGE_LOG": str(usage_log)},
         )
@@ -600,7 +669,7 @@ class RoutingTests(unittest.TestCase):
             config_path, _ = make_config(Path(d))
             usage_log = Path(d) / "usage.jsonl"
             res = subprocess.run(
-                [sys.executable, str(AICLI), "run", "--tool", "claude", "--", "-p", "x"],
+                [sys.executable, str(AICLI), "run", "--class", "t-claude", "--", "-p", "x"],
                 capture_output=True, text=True,
                 env={**os.environ, "AICLI_CONFIG": str(config_path), "AICLI_USAGE_LOG": str(usage_log),
                      "FAKE_CLI_EXIT_CODE": "3"},
@@ -621,7 +690,7 @@ class RoutingTests(unittest.TestCase):
             meta_file = Path(d) / "run.meta.json"
             usage_log = Path(d) / "usage.jsonl"
             res = subprocess.run(
-                [sys.executable, str(AICLI), "run", "--tool", "claude", "--meta-out", str(meta_file)],
+                [sys.executable, str(AICLI), "run", "--class", "t-claude", "--meta-out", str(meta_file)],
                 capture_output=True, text=True,
                 env={**os.environ, "AICLI_CONFIG": str(config_path), "PATH": "/nonexistent",
                      "AICLI_USAGE_LOG": str(usage_log)},
@@ -976,20 +1045,9 @@ class FallbackCliTests(unittest.TestCase):
         out, _ = self.run_cli("run", "--class", "standard-dev", "--", "--model", "claude-sonnet-5", "-p", "hi")
         self.assertEqual(json.loads(out), [str(FAKE_CLI / "fake-agy"), "--model", "gemini-4-argon-medium", "-p", "hi"])
 
-    def test_run_with_a_pinned_tool_stays_on_it(self):
-        out, rows = self.run_cli("run", "--tool", "claude", "--class", "standard-dev", "--", "-p", "hi")
-        self.assertEqual(json.loads(out)[0], str(FAKE_CLI / "fake-claude"))
-        self.assertNotIn("fallback", rows[-1])
-
     def test_no_fallback_flag(self):
         out, _ = self.run_cli("run", "--no-fallback", "--class", "standard-dev", "--", "-p", "hi")
         self.assertEqual(json.loads(out)[0], str(FAKE_CLI / "fake-claude"))
-
-    def test_resolve_names_the_fallback_for_a_pinned_tool(self):
-        out, _ = self.run_cli("resolve", "--tool", "claude", "--class", "standard-dev", "--json")
-        data = json.loads(out)
-        self.assertEqual((data["tool"], data["model"]), ("agy", "gemini-4-argon-medium"))
-        self.assertEqual(data["fallback"]["group"], "Gemini 4 Argon")
 
     def test_resolve_stays_on_claude_when_argon_is_exhausted(self):
         out, _ = self.run_cli("resolve", "--class", "standard-dev", "--json", agy=AGY_ARGON_OUT)
