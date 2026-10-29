@@ -85,11 +85,12 @@ aicli run --client demo --class lightweight-task -- -p "say hi"
 its class's route, and a longer name also matches a shorter one
 (`pjm:p-0001:auto-execute` falls back to `pjm:auto-execute`).
 
-**Routing order:** an explicit `--tool` wins, then the client's own route
-(`ID@CLASS` before `ID`), then its class. A caller passes only `--client` and
-`--class`: there is no `--tier`, `--effort` or `--model` on `aicli run`, `argv`
-or `resolve`. The tier, model and effort live in the router (`aicli.toml`'s
-defaults, overridden live by `aicli route`). Without a class or a `--tool`,
+**Routing order:** the client's own route (`ID@CLASS` before `ID`), then its
+class, then the quota fallback. A caller passes only `--client` and `--class`:
+there is no `--tool`, `--tier`, `--effort` or `--model` on `aicli run`, `argv`
+or `resolve`. The router picks the CLI, and aicli builds and runs that CLI's
+command (see "Jobs"). The tier, model and effort live in the router (`aicli.toml`'s
+defaults, overridden live by `aicli route`). Without a class or a known client,
 aicli exits 2.
 
 ## Config
@@ -121,6 +122,31 @@ row that was added from the state file, not a default one - edit
 `aicli.toml` to drop a default client. Two writers at once (a UI and `aicli
 route`) never race: every write is atomic (temp file + rename).
 
+### Jobs
+
+`run` and `argv` take a tool-neutral job; aicli turns it into the flags of
+whichever CLI the router picked, so a caller never knows or names the CLI.
+
+| Option | claude | agy |
+|---|---|---|
+| `--prompt=TEXT` / `--prompt-file F` | the prompt (a leading `-` is safe) | `-p` prompt |
+| `--system-prompt-file F` | `--append-system-prompt-file` | text put in front of the prompt |
+| `--oneshot` | `-p`: print the answer and exit | `-p` |
+| `--interactive` | no `-p`: stays open | `-i`: stays open |
+| neither | no `-p` (hooks end it) | `-p` (runs to completion) |
+| `--output-format json\|stream-json` | `-p --output-format F`; `stream-json` also adds `--verbose --include-partial-messages` | `--output-format F` |
+| `--session-id ID` / `--resume ID` / `--name N` | same flags | ignored |
+| `--conversation ID` | ignored | `--conversation ID` (an id agy printed in its stream); the system prompt is not added again |
+| `--settings F` (hooks) / `--mcp-config F` | `--settings`, `--strict-mcp-config --mcp-config` | ignored |
+| `--permission-mode dontAsk\|auto\|bypass` | `--permission-mode` (`bypass` is `bypassPermissions`) | only `bypass` (`--dangerously-skip-permissions`); agy's own otherwise |
+
+Pass a prompt that may start with `-` as `--prompt=-text`. Everything after `--`
+is appended verbatim and is only for a human at a terminal
+(`interactive-shell`): those flags belong to one CLI. A caller that must learn
+which CLI ran reads `--meta-out` (written before the CLI starts) or the usage
+log; a hook-based caller (claude `--settings`) must also end on the CLI's exit,
+because agy runs no hooks.
+
 ### Fallback
 
 `[fallback]` moves runs off a plan that is out of quota. Once a tool's
@@ -141,10 +167,8 @@ chain is: Claude plan → Claude through agy → Gemini 3.8 through agy.
   probe) and leave `quota` out of their output otherwise - they never start a
   probe of their own. Only `resolve --quota`, `aicli usage` and `aicli
   fallback` force a live probe.
-- A caller that pins `--tool` built that CLI's own flags, so `run` never
-  moves it to another CLI. Such a caller asks `aicli resolve --tool T --json`
-  first and builds for the `tool` and `model` it returns. A fallback to a
-  step on the same tool still applies.
+- A fallback may change the CLI (claude -> agy), because the caller never built
+  that CLI's flags itself: it describes a job (below) and aicli builds it.
 - `--no-fallback` turns it off for one call. The usage log and `--meta-out`
   record every fallback with its reason.
 
@@ -166,7 +190,7 @@ chain is: Claude plan → Claude through agy → Gemini 3.8 through agy.
 | `aicli route reset-client ID [--field F]` | Same, for a default client's override |
 | `aicli route remove-client ID` | Drop a client row that was added from the state file (not a default one) |
 
-`opts` are `--client ID`, `--class NAME`, `--tool` and `--no-fallback`.
+`opts` are `--client ID`, `--class NAME` and `--no-fallback`.
 
 Details worth knowing:
 

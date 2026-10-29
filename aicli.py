@@ -114,9 +114,99 @@ def infer_agy_group(model):
     return "Gemini Models"
 
 
-def build_argv(config, tool, tier="default", effort=None, extra=None, model=None):
+OUTPUT_FORMATS = ("json", "stream-json")
+PERMISSION_MODES = ("dontAsk", "auto", "bypass")
+JOB_FIELDS = ("prompt", "system_prompt_file", "session_id", "resume", "conversation", "name", "settings",
+              "mcp_config", "permission_mode", "output_format", "oneshot", "interactive")
+
+
+class JobError(ValueError):
+    pass
+
+
+def job_from_args(args):
+    """The tool-neutral job the caller described (None when it passed none). A caller
+    never names a CLI: aicli builds the command for whichever one the router picks."""
+    job = {k: getattr(args, k, None) for k in JOB_FIELDS}
+    if getattr(args, "prompt_file", None):
+        if job["prompt"] is not None:
+            raise JobError("pass either --prompt or --prompt-file, not both")
+        try:
+            job["prompt"] = Path(args.prompt_file).read_text(encoding="utf-8")
+        except OSError as e:
+            raise JobError(f"cannot read --prompt-file: {e}")
+    job = {k: v for k, v in job.items() if v}
+    if job.get("session_id") and job.get("resume"):
+        raise JobError("pass either --session-id or --resume, not both")
+    if job.get("oneshot") and job.get("interactive"):
+        raise JobError("pass either --oneshot or --interactive, not both")
+    return job or None
+
+
+def _job_claude(job, extra):
+    out = []
+    streaming = job.get("output_format") == "stream-json"
+    if job.get("oneshot") or job.get("output_format"):
+        out.append("-p")
+    if job.get("output_format"):
+        out += ["--output-format", job["output_format"]]
+        if streaming:
+            out += ["--verbose", "--include-partial-messages"]
+    if job.get("resume"):
+        out += ["--resume", job["resume"]]
+    if job.get("session_id"):
+        out += ["--session-id", job["session_id"]]
+    if job.get("name"):
+        out += ["--name", job["name"]]
+    if job.get("mcp_config"):
+        # --mcp-config swallows every argument up to the next option: it must
+        # never come right before the prompt.
+        out += ["--strict-mcp-config", "--mcp-config", job["mcp_config"]]
+    if job.get("permission_mode"):
+        out += ["--permission-mode", "bypassPermissions" if job["permission_mode"] == "bypass" else job["permission_mode"]]
+    if job.get("system_prompt_file"):
+        out += ["--append-system-prompt-file", job["system_prompt_file"]]
+    if job.get("settings"):
+        out += ["--settings", job["settings"]]
+    out += extra
+    if job.get("prompt"):
+        # a leading "-" would be read as an option
+        out.append(" " + job["prompt"] if job["prompt"].startswith("-") else job["prompt"])
+    return out
+
+
+def _job_agy(job, extra):
+    """agy runs to completion (`-p`) unless the job is interactive (`-i`: it stays open for a
+    human). It has no append-prompt, session, hook, MCP or permission flags, so the system
+    prompt joins the prompt and those fields are left out: a caller that depends on them reads
+    the exit code and the output instead. A conversation agy already has (`--conversation`)
+    got the system prompt when it began, so it is not added again."""
+    prompt = job.get("prompt") or ""
+    if job.get("system_prompt_file") and not job.get("conversation"):
+        try:
+            system = Path(job["system_prompt_file"]).read_text(encoding="utf-8").rstrip()
+        except OSError as e:
+            raise JobError(f"cannot read --system-prompt-file: {e}")
+        prompt = f"{system}\n\n{prompt}" if prompt else system
+    if not prompt and job.get("interactive"):
+        prompt = "The human opened your window. Say in one line that you are ready."
+    out = ["-i" if job.get("interactive") else "-p", prompt]
+    if job.get("permission_mode") == "bypass":
+        out.append("--dangerously-skip-permissions")
+    if job.get("output_format"):
+        out += ["--output-format", job["output_format"]]
+    if job.get("conversation"):
+        out += ["--conversation", job["conversation"]]
+    return out + extra
+
+
+JOB_BUILDERS = {"claude": _job_claude, "agy": _job_agy}
+
+
+def build_argv(config, tool, tier="default", effort=None, extra=None, model=None, job=None):
     """The argv `run` would exec, or None if the binary can't be found. `model`
-    replaces the tier's model and any `--model` the caller passed (a fallback step)."""
+    replaces the tier's model and any `--model` the caller passed (a fallback step).
+    `job` is the tool-neutral request (see job_from_args), built into this tool's flags."""
     cfg = config[tool]
     bin_path = resolve_bin(config, tool)
     if bin_path is None:
@@ -144,7 +234,7 @@ def build_argv(config, tool, tier="default", effort=None, extra=None, model=None
     if effort and effort_flag and not _has_flag(extra, effort_flag):
         argv += [effort_flag, effort]
 
-    argv += extra
+    argv += JOB_BUILDERS[tool](job, extra) if job else extra
     return argv
 
 
@@ -381,8 +471,7 @@ def route_model(routes, client, workload_class):
     return (entry or {}).get("model") or None
 
 
-def resolve_route(config, client=None, workload_class=None, requested_tool=None,
-                  routes=None):
+def resolve_route(config, client=None, workload_class=None, routes=None):
     if routes is None:
         routes = load_routes(config)
     classes = routes.get("classes") or {}
@@ -414,11 +503,8 @@ def resolve_route(config, client=None, workload_class=None, requested_tool=None,
         if not target_effort:
             target_effort = cls_def.get("effort")
 
-    if requested_tool:
-        target_tool = requested_tool
-
     if not target_tool:
-        raise ValueError("either --tool, --class, or a known --client is required")
+        raise ValueError("either --class or a known --client is required")
 
     if target_tool not in TOOLS:
         raise ValueError(f"unknown tool {target_tool!r} (known: {', '.join(TOOLS)})")
@@ -1385,16 +1471,34 @@ def build_parser():
     p_which.add_argument("tool", choices=TOOLS)
 
     def add_tool_args(p):
-        p.add_argument("--tool", choices=TOOLS)
         p.add_argument("--client", help="client identifier (e.g. pjm:maintainer, ai-job-search)")
         p.add_argument("--class", dest="workload_class", help="workload class (e.g. maintenance, standard-dev)")
         p.add_argument("--json", action="store_true")
         p.add_argument("--no-fallback", action="store_true", help="never move to a fallback step")
         p.add_argument("args", nargs=argparse.REMAINDER)
 
-    add_tool_args(sub.add_parser("argv"))
+    def add_job_args(p):
+        # The tool-neutral job: aicli builds it into the flags of whichever CLI the router picks.
+        p.add_argument("--prompt", help="the prompt (claude: interactive unless --oneshot or --output-format; agy: always one-shot)")
+        p.add_argument("--prompt-file", help="read the prompt from this file")
+        p.add_argument("--system-prompt-file", help="instructions added to the CLI's own (agy: put in front of the prompt)")
+        p.add_argument("--session-id", help="start a session with this UUID (agy: ignored)")
+        p.add_argument("--resume", help="resume this session (agy: ignored)")
+        p.add_argument("--conversation", help="continue this agy conversation, an id agy printed (claude: ignored)")
+        p.add_argument("--name", help="display name of the session (agy: ignored)")
+        p.add_argument("--settings", help="claude settings file, hooks included (agy: ignored)")
+        p.add_argument("--mcp-config", help="MCP servers file, the only ones loaded (agy: ignored)")
+        p.add_argument("--permission-mode", choices=PERMISSION_MODES, help="dontAsk, auto, or bypass (no permission prompts at all); agy only honours bypass")
+        p.add_argument("--output-format", choices=OUTPUT_FORMATS, help="one-shot output; stream-json prints events as they come")
+        p.add_argument("--oneshot", action="store_true", help="print the answer and exit")
+        p.add_argument("--interactive", action="store_true", help="stay open for a human to type into (agy: -i instead of -p)")
+
+    p_argv = sub.add_parser("argv")
+    add_tool_args(p_argv)
+    add_job_args(p_argv)
     p_run = sub.add_parser("run")
     add_tool_args(p_run)
+    add_job_args(p_run)
     p_run.add_argument("--meta-out", help="write execution metadata (model, quota, timestamp) to path before exec")
 
     p_resolve = sub.add_parser("resolve")
@@ -1496,13 +1600,17 @@ def cmd_which(args, config):
 
 def cmd_argv(args, config):
     extra = _strip_dashdash(args.args)
+    try:
+        job = job_from_args(args)
+    except JobError as e:
+        print(f"aicli: {e}", file=sys.stderr)
+        return 2
     routes = load_routes(config)
     try:
         tool, tier, effort, resolved_class = resolve_route(
             config,
             client=args.client,
             workload_class=args.workload_class,
-            requested_tool=args.tool,
             routes=routes,
         )
     except ValueError as e:
@@ -1513,7 +1621,12 @@ def cmd_argv(args, config):
                                    workload_class=resolved_class, routes=routes, effort=effort)
     eff = fallback.get("effort") if fallback else effort
     pinned = None if fallback else route_model(routes, args.client, resolved_class)
-    argv = build_argv(config, tool, tier, eff, extra, model=(fallback or {}).get("model") or pinned)
+    try:
+        argv = build_argv(config, tool, tier, eff, extra, model=(fallback or {}).get("model") or pinned,
+                          job=job)
+    except JobError as e:
+        print(f"aicli: {e}", file=sys.stderr)
+        return 2
     if argv is None:
         print(f"{tool} CLI not found", file=sys.stderr)
         return 1
@@ -1528,7 +1641,6 @@ def cmd_resolve(args, config):
             config,
             client=args.client,
             workload_class=args.workload_class,
-            requested_tool=args.tool,
             routes=routes,
         )
     except ValueError as e:
@@ -1575,15 +1687,11 @@ def cmd_resolve(args, config):
 
 
 def _run_fallback(args, config, tool, tier, quota, workload_class=None, routes=None, effort=None):
-    """(tool, fallback) for `run` and `argv`. A caller that pinned --tool built that
-    CLI's own flags, which the other CLI would not understand: it asks `aicli
-    resolve` first and builds for the answer. A step on the same tool only changes
-    the model, so it still applies."""
+    """(tool, fallback) for `run` and `argv`: the tool the router picked, or the fallback
+    step that replaces it. The caller named no CLI, so any step may apply."""
     fallback = None if args.no_fallback else pick_fallback(
         config, tool, tier, quota, workload_class=workload_class, routes=routes, effort=effort
     )
-    if fallback and args.tool and fallback["tool"] != tool:
-        fallback = None
     return (fallback["tool"] if fallback else tool), fallback
 
 
@@ -1621,13 +1729,17 @@ def _quota_reader(config):
 
 def cmd_run(args, config):
     extra = _strip_dashdash(args.args)
+    try:
+        job = job_from_args(args)
+    except JobError as e:
+        print(f"aicli: {e}", file=sys.stderr)
+        return 2
     routes = load_routes(config)
     try:
         tool, tier, effort, resolved_class = resolve_route(
             config,
             client=args.client,
             workload_class=args.workload_class,
-            requested_tool=args.tool,
             routes=routes,
         )
     except ValueError as e:
@@ -1639,7 +1751,12 @@ def cmd_run(args, config):
                                    workload_class=resolved_class, routes=routes, effort=effort)
     eff = fallback.get("effort") if fallback else effort
     pinned = None if fallback else route_model(routes, args.client, resolved_class)
-    argv = build_argv(config, tool, tier, eff, extra, model=(fallback or {}).get("model") or pinned)
+    try:
+        argv = build_argv(config, tool, tier, eff, extra, model=(fallback or {}).get("model") or pinned,
+                          job=job)
+    except JobError as e:
+        print(f"aicli: {e}", file=sys.stderr)
+        return 2
     if argv is None:
         print(f"{tool} CLI not found", file=sys.stderr)
         return 1
