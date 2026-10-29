@@ -115,7 +115,7 @@ def infer_agy_group(model):
 
 
 OUTPUT_FORMATS = ("json", "stream-json")
-PERMISSION_MODES = ("dontAsk", "auto")
+PERMISSION_MODES = ("dontAsk", "auto", "bypass")
 JOB_FIELDS = ("prompt", "system_prompt_file", "session_id", "resume", "conversation", "name", "settings",
               "mcp_config", "permission_mode", "output_format", "oneshot", "interactive")
 
@@ -163,7 +163,7 @@ def _job_claude(job, extra):
         # never come right before the prompt.
         out += ["--strict-mcp-config", "--mcp-config", job["mcp_config"]]
     if job.get("permission_mode"):
-        out += ["--permission-mode", job["permission_mode"]]
+        out += ["--permission-mode", "bypassPermissions" if job["permission_mode"] == "bypass" else job["permission_mode"]]
     if job.get("system_prompt_file"):
         out += ["--append-system-prompt-file", job["system_prompt_file"]]
     if job.get("settings"):
@@ -191,6 +191,8 @@ def _job_agy(job, extra):
     if not prompt and job.get("interactive"):
         prompt = "The human opened your window. Say in one line that you are ready."
     out = ["-i" if job.get("interactive") else "-p", prompt]
+    if job.get("permission_mode") == "bypass":
+        out.append("--dangerously-skip-permissions")
     if job.get("output_format"):
         out += ["--output-format", job["output_format"]]
     if job.get("conversation"):
@@ -1486,7 +1488,7 @@ def build_parser():
         p.add_argument("--name", help="display name of the session (agy: ignored)")
         p.add_argument("--settings", help="claude settings file, hooks included (agy: ignored)")
         p.add_argument("--mcp-config", help="MCP servers file, the only ones loaded (agy: ignored)")
-        p.add_argument("--permission-mode", choices=PERMISSION_MODES, help="dontAsk or auto (agy: its own)")
+        p.add_argument("--permission-mode", choices=PERMISSION_MODES, help="dontAsk, auto, or bypass (no permission prompts at all); agy only honours bypass")
         p.add_argument("--output-format", choices=OUTPUT_FORMATS, help="one-shot output; stream-json prints events as they come")
         p.add_argument("--oneshot", action="store_true", help="print the answer and exit")
         p.add_argument("--interactive", action="store_true", help="stay open for a human to type into (agy: -i instead of -p)")

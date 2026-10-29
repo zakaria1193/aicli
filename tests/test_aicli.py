@@ -360,6 +360,13 @@ class JobTests(unittest.TestCase):
     def test_oneshot_and_interactive_conflict(self):
         self.assertEqual(self.argv("t-claude", "--oneshot", "--interactive").returncode, 2)
 
+    def test_bypass_permissions_is_each_tools_own_flag(self):
+        claude = json.loads(self.argv("t-claude", "--permission-mode", "bypass", "--prompt", "x").stdout)
+        self.assertEqual(claude[claude.index("--permission-mode") + 1], "bypassPermissions")
+        agy = json.loads(self.argv("t-agy", "--permission-mode", "bypass", "--prompt", "x").stdout)
+        self.assertIn("--dangerously-skip-permissions", agy)
+        self.assertNotIn("--dangerously-skip-permissions", json.loads(self.argv("t-agy", "--prompt", "x").stdout))
+
     def test_prompt_file(self):
         result = self.argv("t-agy", "--prompt-file", "{d}/q.md", files={"q.md": "from file"})
         self.assertEqual(json.loads(result.stdout)[-2:], ["-p", "from file"])

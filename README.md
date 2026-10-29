@@ -138,7 +138,7 @@ whichever CLI the router picked, so a caller never knows or names the CLI.
 | `--session-id ID` / `--resume ID` / `--name N` | same flags | ignored |
 | `--conversation ID` | ignored | `--conversation ID` (an id agy printed in its stream); the system prompt is not added again |
 | `--settings F` (hooks) / `--mcp-config F` | `--settings`, `--strict-mcp-config --mcp-config` | ignored |
-| `--permission-mode dontAsk\|auto` | `--permission-mode` | ignored (agy's own) |
+| `--permission-mode dontAsk\|auto\|bypass` | `--permission-mode` (`bypass` is `bypassPermissions`) | only `bypass` (`--dangerously-skip-permissions`); agy's own otherwise |
 
 Pass a prompt that may start with `-` as `--prompt=-text`. Everything after `--`
 is appended verbatim and is only for a human at a terminal
