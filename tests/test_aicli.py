@@ -776,6 +776,13 @@ class RoutingTests(unittest.TestCase):
             tool, tier, effort, cls = aicli.resolve_route(config, client="pjm:maintainer:homelab:routine", routes=routes)
             self.assertEqual((tool, tier, cls), ("agy", "low", "maintenance"))
 
+    def test_shipped_scrum_master_runs_on_agy_low(self):
+        config = aicli.load_config(ROOT / "aicli.toml")
+        classes, clients, _ = aicli._default_sections(config)
+        got = aicli.resolve_route(config, client="pjm:scrum-master", workload_class="managerial-audit",
+                                  routes={"classes": classes, "clients": clients})
+        self.assertEqual(got[:2], ("agy", "low"))
+
     def test_client_and_class_pin_a_model(self):
         with tempfile.TemporaryDirectory() as d:
             config_path, config = make_config(Path(d))

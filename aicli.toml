@@ -76,6 +76,14 @@ frequency = "4 times / day (07:30, 12:00, 17:00, 22:00)"
 tool = "agy"
 tier = "low"
 
+# The Scrum master's scheduled sweep (stuck tickets, paused work, the daily report) is
+# bookkeeping: it must never run on Opus. The client row pins it to agy at low effort even
+# if the managerial-audit class is later pointed somewhere else.
+[clients."pjm:scrum-master"]
+class = "managerial-audit"
+tool = "agy"
+tier = "low"
+
 [classes.brainstorm]
 description = "Divergent idea generation: exploring an opportunity into angles and ideas"
 frequency = "On-demand, a few calls a day"
