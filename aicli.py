@@ -940,7 +940,7 @@ def get_tool_quota(config, tool, timeout=None, now=None):
 # Once the primary plan's five-hour or weekly bar reaches `at` percent, runs of
 # that class move to the first step whose own quota group has room.
 
-DEFAULT_FALLBACK_AT = 95
+DEFAULT_FALLBACK_AT = 97
 
 
 def fallback_at(config):

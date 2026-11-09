@@ -897,7 +897,7 @@ if __name__ == "__main__":
 
 
 CLAUDE_OUT = """Current session: 20% used · resets Oct 22, 3:49am (Europe/Paris)
-Current week (all models): 96% used · resets Oct 26, 5:59pm (Europe/Paris)
+Current week (all models): 98% used · resets Oct 26, 5:59pm (Europe/Paris)
 """
 AGY_ROOM = """Gemini Models\tWeekly Limit Remaining\t40%\t2026-10-23T22:43:51Z
 Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-28T21:47:44Z
@@ -940,11 +940,17 @@ class FallbackTests(unittest.TestCase):
     def test_claude_with_room_stays_on_claude(self):
         self.assertIsNone(self.pick(reading(weekly=60, five_hour=10), agy_reading(**{"Gemini 4 Argon": 7})))
 
+    def test_claude_under_the_pause_stays_on_claude(self):
+        # pjm pauses Claude at 97%: at 95-96% Claude still counts as available, so the
+        # fallback's small pool must not be spent first (salsa-social, 2026-11-08)
+        self.assertEqual(aicli.fallback_at(self.config), 97)
+        self.assertIsNone(self.pick(reading(weekly=96, five_hour=10), agy_reading(**{"Gemini 4 Argon": 7})))
+
     def test_standard_dev_falls_back_to_agy_gemini_4_argon_medium(self):
-        fb = self.pick(reading(weekly=96, five_hour=10), agy_reading(**{"Gemini 4 Argon": 7}))
+        fb = self.pick(reading(weekly=98, five_hour=10), agy_reading(**{"Gemini 4 Argon": 7}))
         self.assertEqual((fb["tool"], fb["model"], fb["group"]), ("agy", "gemini-4-argon-medium", "Gemini 4 Argon"))
         self.assertEqual(fb["from_model"], "claude-sonnet-5")
-        self.assertIn("96%", fb["reason"])
+        self.assertIn("98%", fb["reason"])
         self.assertTrue(fb.get("next_ok_at"))
 
     def test_deep_spec_opus_has_no_fallback(self):
@@ -971,7 +977,7 @@ class FallbackTests(unittest.TestCase):
 
     def test_status_marks_per_class_state(self):
         status = aicli.fallback_status(self.config, {
-            "claude": reading(weekly=96),
+            "claude": reading(weekly=98),
             "agy": agy_reading(Gemini_Models=60, **{"Gemini 4 Argon": 7}),
         })
         classes = status["classes"]
@@ -1034,7 +1040,7 @@ class FallbackTests(unittest.TestCase):
 
 
 class FallbackCliTests(unittest.TestCase):
-    """`aicli run/resolve` against the fake CLIs, with the Claude plan at 96%."""
+    """`aicli run/resolve` against the fake CLIs, with the Claude plan at 98%."""
 
     def run_cli(self, *args, agy=AGY_ROOM):
         with tempfile.TemporaryDirectory() as d:

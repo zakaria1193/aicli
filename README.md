@@ -150,12 +150,18 @@ because agy runs no hooks.
 ### Fallback
 
 `[fallback]` moves runs off a plan that is out of quota. Once a tool's
-five-hour or weekly bar reaches `at` percent (95 by default), `resolve`,
+five-hour or weekly bar reaches `at` percent (97 by default), `resolve`,
 `argv` and `run` use the first `[[fallback.<tool>]]` step that still has
 room. A step names a tool, the agy quota `group` that limits it, and a model
 per tier. agy meters its Claude models apart from Gemini, so the shipped
 chain is: Claude plan → Claude through agy → Gemini 3.8 through agy.
 
+- Keep `at` equal to the caller's own pause threshold (pjm pauses Claude steps at 97%).
+  A lower `at` sends work to the fallback while the primary still has room in the caller's
+  eyes, and the fallback's smaller pool runs out first.
+- The choice is made each time a run starts: once the primary is under `at` again (or its
+  reset time has passed and a fresh reading says so), the next run is on the primary. A
+  run already going on the fallback finishes there.
 - An unknown reading counts as room. A probe that times out never moves work.
 - Quota is read only when a fallback decision needs it: a class with no
   `fallback` step never probes and never waits, on `run` or `resolve`.
