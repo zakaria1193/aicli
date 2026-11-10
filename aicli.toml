@@ -84,6 +84,15 @@ class = "managerial-audit"
 tool = "agy"
 tier = "low"
 
+# The routine maintainer runs on agy, at medium thinking (Zak, 2026-11-10): Flash low wrote
+# salsa-social reports that ended on "Waiting for npm run e2e…" and named branches that did
+# not exist. Sonnet would do better but its quota is kept for ticket work. Deep runs keep the
+# maintenance class as it is.
+[clients."pjm:maintainer:routine"]
+class = "maintenance"
+tool = "agy"
+model = "gemini-3.8-flash-medium"
+
 [classes.brainstorm]
 description = "Divergent idea generation: exploring an opportunity into angles and ideas"
 frequency = "On-demand, a few calls a day"
