@@ -109,7 +109,7 @@ effort = "medium"
 fallback = { tool = "agy", model = "gemini-4-argon-medium", group = "Gemini 4 Argon" }
 
 [classes.conversation-deep]
-description = "Talking to a project agent that must think and push back (pjm Product lead)"
+description = "Talking to a project agent that must think and push back (pjm Product lead, Designer)"
 frequency = "On-demand, interactive"
 tool = "claude"
 tier = "deep"
