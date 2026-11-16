@@ -379,6 +379,19 @@ class JobTests(unittest.TestCase):
         result = self.argv("t-claude", "--session-id", "a", "--resume", "b", "--prompt", "x")
         self.assertEqual(result.returncode, 2)
 
+    def test_remote_control_is_each_tools_own_flag(self):
+        claude = json.loads(self.argv("t-claude", "--remote-control", "--name", "n", "--prompt", "x").stdout)
+        self.assertIn("--remote-control", claude)
+        self.assertEqual(claude[claude.index("--name") + 1], "n")
+        agy = json.loads(self.argv("t-agy", "--remote-control", "--prompt", "x").stdout)
+        self.assertIn("--remote-control", agy)
+
+    def test_without_remote_control_nothing_changes(self):
+        claude = json.loads(self.argv("t-claude", "--prompt", "x").stdout)
+        self.assertNotIn("--remote-control", claude)
+        agy = json.loads(self.argv("t-agy", "--prompt", "x").stdout)
+        self.assertNotIn("--remote-control", agy)
+
     def test_the_router_not_the_caller_picks_the_cli_for_the_same_job(self):
         job = ("--prompt", "hi", "--output-format", "json")
         claude = json.loads(self.argv("t-claude", *job).stdout)

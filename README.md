@@ -135,10 +135,11 @@ whichever CLI the router picked, so a caller never knows or names the CLI.
 | `--interactive` | no `-p`: stays open | `-i`: stays open |
 | neither | no `-p` (hooks end it) | `-p` (runs to completion) |
 | `--output-format json\|stream-json` | `-p --output-format F`; `stream-json` also adds `--verbose --include-partial-messages` | `--output-format F` |
-| `--session-id ID` / `--resume ID` / `--name N` | same flags | ignored |
+| `--session-id ID` / `--resume ID` / `--name N` | same flags | ignored (agy has no way to name a session) |
 | `--conversation ID` | ignored | `--conversation ID` (an id agy printed in its stream); the system prompt is not added again |
 | `--settings F` (hooks) / `--mcp-config F` | `--settings`, `--strict-mcp-config --mcp-config` | ignored |
 | `--permission-mode dontAsk\|auto\|bypass` | `--permission-mode` (`bypass` is `bypassPermissions`) | only `bypass` (`--dangerously-skip-permissions`); agy's own otherwise |
+| `--remote-control` | `--remote-control` (Remote Control on at start) | `--remote-control` (same) |
 
 Pass a prompt that may start with `-` as `--prompt=-text`. Everything after `--`
 is appended verbatim and is only for a human at a terminal
