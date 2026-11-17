@@ -94,16 +94,11 @@ tool = "agy"
 model = "gemini-3.8-flash-medium"
 
 # The product-related agents (Product lead pjm:product:<project> on every project, Slack and
-# voice; Designer pjm:designer; idea-stem brainstorm pjm:stems) run on Gemini 4 Argon through
+# voice; idea-stem brainstorm pjm:stems) run on Gemini 4 Argon through
 # agy (Zak, 2026-11-17). Official route, not an override: callers still pass only client and
-# class. High effort because they must think and push back. Chief of staff and Tech lead are
-# not product-facing and keep their class routes.
+# class. High effort because they must think and push back. The Designer stays on Claude (Zak),
+# like the Chief of staff and Tech lead, on its class route.
 [clients."pjm:product"]
-class = "conversation-deep"
-tool = "agy"
-model = "gemini-4-argon-high"
-
-[clients."pjm:designer"]
 class = "conversation-deep"
 tool = "agy"
 model = "gemini-4-argon-high"
