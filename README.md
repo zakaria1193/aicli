@@ -79,6 +79,7 @@ aicli run --client demo --class lightweight-task -- -p "say hi"
 | `brainstorm` | divergent idea generation, mind maps |
 | `conversation` | talking to a project agent, quick answers (pjm Chief of staff, Tech lead) |
 | `conversation-deep` | talking to a project agent that must think and push back (pjm Product lead, Designer) |
+| `deploy-engineer` | deploying a finished change and checking it live (pjm deploy step) |
 | `interactive-shell` | a human at a terminal |
 
 **Clients** name the caller, like `myrepo:summarize`. A client can override
