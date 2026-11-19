@@ -469,10 +469,16 @@ def find_client_entry(clients, client, workload_class=None):
 
 
 def route_model(routes, client, workload_class):
-    """The `model` a routes.json client entry pins for this client and class, else None.
+    """The `model` a routes.json client or class entry pins, else None.
     The one place a model override lives: callers pass a client and a class, never --model."""
     entry = find_client_entry((routes or {}).get("clients") or {}, client, workload_class)
-    return (entry or {}).get("model") or None
+    if (entry or {}).get("model"):
+        return entry["model"]
+    if workload_class:
+        cls_def = ((routes or {}).get("classes") or {}).get(workload_class) or {}
+        if cls_def.get("model"):
+            return cls_def["model"]
+    return None
 
 
 def resolve_route(config, client=None, workload_class=None, routes=None):
