@@ -82,9 +82,18 @@ aicli run --client demo --class lightweight-task -- -p "say hi"
 | `deploy-engineer` | deploying a finished change and checking it live (pjm deploy step) |
 | `interactive-shell` | a human at a terminal |
 
-**Clients** name the caller, like `myrepo:summarize`. A client can override
-its class's route, and a longer name also matches a shorter one
-(`pjm:p-0001:auto-execute` falls back to `pjm:auto-execute`).
+**Clients** name the caller, like `myrepo:summarize`. A client maps to a
+workload class. A client can carry a route adjustment, and a longer name also
+matches a shorter one (`pjm:p-0001:auto-execute` falls back to `pjm:auto-execute`).
+
+> [!IMPORTANT]
+> **temporary_override (5h Max)**: The model override feature is named
+> `temporary_override` and is strictly temporary, lasting at most **5 hours**
+> (after which it expires and reverts to the class route). Clients must **stop
+> using model overrides as permanent configurations**. Callers should always
+> **reuse an existing class first** or **create a new persona class in `aicli.toml`**
+> if their workload really does not fit any existing class. Workload classes
+> represent types of persons/roles, not models.
 
 **Routing order:** the client's own route (`ID@CLASS` before `ID`), then its
 class, then the quota fallback. A caller passes only `--client` and `--class`:
@@ -193,7 +202,7 @@ chain is: Claude plan → Claude through agy → Gemini 3.8 through agy.
 | `aicli routes [--json]` | Show the routing table |
 | `aicli routes-api get\|save\|page\|static [--scope PREFIX]` | The routing page (`routes_static/`): its data, its saving, its HTML. See [Routing page](#routing-page) |
 | `aicli route set-class NAME --tool T [--tier ...]` | Change a class's route |
-| `aicli route set-client ID [--class C] [--tool T] [--tier ...] [--effort E] [--model M]` | Route one client. `--model` is the only place a model is pinned: name the client `ID@CLASS` to pin it for one class |
+| `aicli route set-client ID [--class C] [--tool T] [--tier ...] [--effort E] [--model M]` | Route one client. `--model` sets a **temporary override** lasting at most 5 hours: callers should reuse an existing class or create one in `aicli.toml` rather than using model overrides |
 | `aicli route reset-class NAME [--field F]` | Drop a class's override (one field, or all of it), back to `aicli.toml` |
 | `aicli route reset-client ID [--field F]` | Same, for a default client's override |
 | `aicli route remove-client ID` | Drop a client row that was added from the state file (not a default one) |

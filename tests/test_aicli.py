@@ -7,6 +7,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -829,6 +830,83 @@ class RoutingTests(unittest.TestCase):
             routes["clients"]["pjm:custom-tier"] = {"class": "standard-dev", "tier": "low"}
             self.assertIsNone(aicli.route_model(routes, "pjm:custom-tool", "standard-dev"))
             self.assertIsNone(aicli.route_model(routes, "pjm:custom-tier", "standard-dev"))
+
+    def test_temporary_model_override_and_expiration(self):
+        now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+        exp_5h = aicli.compute_model_override_expires_at(now=now)
+        self.assertEqual(exp_5h, "2026-11-22T17:00:00+00:00")
+
+        # Active override
+        entry_active = {"model": "claude-opus-5-5", "model_expires_at": exp_5h}
+        self.assertEqual(aicli.active_model_override(entry_active, now=now), "claude-opus-5-5")
+
+        # 4 hours later (still active)
+        now_4h = now + timedelta(hours=4)
+        self.assertEqual(aicli.active_model_override(entry_active, now=now_4h), "claude-opus-5-5")
+
+        # 5 hours later (expired)
+        now_5h = now + timedelta(hours=5)
+        self.assertIsNone(aicli.active_model_override(entry_active, now=now_5h))
+
+        # route_model honors active override and ignores expired
+        routes = {
+            "classes": {"deep-spec": {"tool": "claude", "tier": "deep"}},
+            "clients": {"pjm:test": entry_active},
+        }
+        self.assertEqual(aicli.route_model(routes, "pjm:test", "deep-spec", now=now), "claude-opus-5-5")
+        self.assertIsNone(aicli.route_model(routes, "pjm:test", "deep-spec", now=now_5h))
+
+    def test_set_client_model_sets_5h_temporary_override(self):
+        with tempfile.TemporaryDirectory() as d:
+            config_path, config = make_config(Path(d))
+            routes_file = aicli.default_routes_path(config)
+            parser = aicli.build_parser()
+            args = parser.parse_args(["route", "set-client", "my:caller", "--class", "standard-dev", "--temporary-override", "claude-opus-5-5"])
+            ret = aicli.cmd_route(args, config)
+            self.assertEqual(ret, 0)
+            loaded = aicli.load_routes(config, routes_path=routes_file)
+            client = loaded["clients"]["my:caller"]
+            self.assertEqual(client["model"], "claude-opus-5-5")
+            self.assertEqual(client["temporary_override"], "claude-opus-5-5")
+            self.assertIn("model_expires_at", client)
+            self.assertIn("temporary_override_expires_at", client)
+
+            # 5h later, load_routes drops the temporary override
+            future = datetime.now(timezone.utc) + timedelta(hours=5, minutes=1)
+            future_loaded = aicli.load_routes(config, routes_path=routes_file, now=future)
+            self.assertNotIn("model", future_loaded["clients"].get("my:caller", {}))
+            self.assertNotIn("temporary_override", future_loaded["clients"].get("my:caller", {}))
+
+    def test_cli_temporary_override_subcommand(self):
+        with tempfile.TemporaryDirectory() as d:
+            config_path, config = make_config(Path(d))
+            routes_file = aicli.default_routes_path(config)
+            parser = aicli.build_parser()
+            args = parser.parse_args(["route", "temporary-override", "my:caller", "gemini-4-hydrogen-high"])
+            ret = aicli.cmd_route(args, config)
+            self.assertEqual(ret, 0)
+            loaded = aicli.load_routes(config, routes_path=routes_file)
+            client = loaded["clients"]["my:caller"]
+            self.assertEqual(client["temporary_override"], "gemini-4-hydrogen-high")
+            self.assertEqual(client["model"], "gemini-4-hydrogen-high")
+
+    def test_shipped_config_gemini_4_tiers_and_persona_classes(self):
+        with open(ROOT / "aicli.toml", "rb") as f:
+            shipped = tomllib.load(f)
+        agy_tiers = shipped.get("agy", {}).get("tiers", {})
+        self.assertEqual(agy_tiers.get("low"), "gemini-3.8-flash-low")
+        self.assertEqual(agy_tiers.get("default"), "gemini-4-hydrogen-medium")
+        self.assertEqual(agy_tiers.get("deep"), "gemini-4-hydrogen-high")
+
+        # Classes must represent roles/personas, not models
+        classes = shipped.get("classes", {})
+        self.assertNotIn("hydrogen-low", classes)
+        self.assertNotIn("hydrogen-high", classes)
+        self.assertNotIn("agy-high", classes)
+        self.assertIn("career-assistant", classes)
+        self.assertIn("career-coach", classes)
+        self.assertEqual(classes["career-assistant"]["model"], "gemini-4-hydrogen-low")
+        self.assertEqual(classes["career-coach"]["tier"], "deep")
 
     def test_available_models_includes_hydrogen_variants(self):
         for m in ("gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-high"):

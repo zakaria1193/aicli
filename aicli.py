@@ -38,9 +38,14 @@ AVAILABLE_MODELS = {
         "gemini-4-hydrogen-low",
         "gemini-4-hydrogen-medium",
         "gemini-4-hydrogen-high",
+        "gemini-4-hydrogen-xhigh",
         "gemini-4-argon-low",
         "gemini-4-argon-medium",
         "gemini-4-argon-high",
+        "gemini-4-neon-low",
+        "gemini-4-neon-medium",
+        "gemini-4-neon-high",
+        "gemini-4-neon-xhigh",
         "gemini-3.8-flash-low",
         "gemini-3.8-flash-medium",
         "gemini-3.8-flash-high",
@@ -51,6 +56,8 @@ AVAILABLE_MODELS = {
         "claude-opus-5-5-medium",
         "claude-opus-5-5-high",
         "gpt-oss-120b-medium",
+        "gemini-pro-orchestrator-neon",
+        "gemini-pro-orchestrator-g1-pro",
     ],
 }
 DEFAULT_USAGE_LOG = Path("~/.local/state/aicli/usage.jsonl").expanduser()
@@ -317,43 +324,80 @@ def _read_state_file(routes_file):
         return {}
 
 
-def load_routes(config=None, routes_path=None):
+def load_routes(config=None, routes_path=None, now=None):
     routes_file = Path(routes_path) if routes_path else default_routes_path(config)
     # The [classes.*]/[clients.*] tables in aicli.toml are the one source of the
     # defaults; the untracked state file (the live switchboard, e.g. homelab's
     # cockpit) is layered over them, field by field.
     classes, clients, optiplex_projects = _default_sections(config)
     state = _read_state_file(routes_file)
+    now_dt = now or datetime.now(timezone.utc)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+
     if isinstance(state.get("classes"), dict):
         for name, d in state["classes"].items():
             if isinstance(d, dict):
-                classes.setdefault(name, {}).update(d)
+                d_clean = dict(d)
+                exp = d_clean.get("temporary_override_expires_at") or d_clean.get("model_expires_at")
+                if exp and isinstance(exp, str):
+                    exp_dt = parse_reset_time(exp, now=now_dt)
+                    if exp_dt is not None and now_dt >= exp_dt:
+                        d_clean.pop("temporary_override", None)
+                        d_clean.pop("temporary_override_expires_at", None)
+                        d_clean.pop("model", None)
+                        d_clean.pop("model_expires_at", None)
+                classes.setdefault(name, {}).update(d_clean)
     if isinstance(state.get("clients"), dict):
         for name, d in state["clients"].items():
             if isinstance(d, dict):
-                clients.setdefault(name, {}).update(d)
+                d_clean = dict(d)
+                exp = d_clean.get("temporary_override_expires_at") or d_clean.get("model_expires_at")
+                if exp and isinstance(exp, str):
+                    exp_dt = parse_reset_time(exp, now=now_dt)
+                    if exp_dt is not None and now_dt >= exp_dt:
+                        d_clean.pop("temporary_override", None)
+                        d_clean.pop("temporary_override_expires_at", None)
+                        d_clean.pop("model", None)
+                        d_clean.pop("model_expires_at", None)
+                clients.setdefault(name, {}).update(d_clean)
     if isinstance(state.get("optiplex_projects"), list):
         optiplex_projects = [str(x) for x in state["optiplex_projects"]]
 
     return {"classes": classes, "clients": clients, "optiplex_projects": optiplex_projects}
 
 
-def _overridden_names(config=None, routes_path=None):
+def _overridden_names(config=None, routes_path=None, now=None):
     """(overridden classes, overridden clients, stale classes, stale clients):
     which rows carry a state-file override, and which of those overrides refer
     to a row no longer in aicli.toml (ignored by load_routes unless it is a
-    whole added row)."""
+    whole added row). Expired temporary model overrides are ignored."""
     routes_file = Path(routes_path) if routes_path else default_routes_path(config)
     state = _read_state_file(routes_file)
     default_classes, default_clients, _ = _default_sections(config)
+    now_dt = now or datetime.now(timezone.utc)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+
     overridden = {"classes": set(), "clients": set()}
     stale = {"classes": set(), "clients": set()}
     for section, defaults in (("classes", default_classes), ("clients", default_clients)):
         for name, d in (state.get(section) or {}).items():
             if not isinstance(d, dict):
                 continue
+            d_active = dict(d)
+            exp = d_active.get("temporary_override_expires_at") or d_active.get("model_expires_at")
+            if exp and isinstance(exp, str):
+                exp_dt = parse_reset_time(exp, now=now_dt)
+                if exp_dt is not None and now_dt >= exp_dt:
+                    d_active.pop("temporary_override", None)
+                    d_active.pop("temporary_override_expires_at", None)
+                    d_active.pop("model", None)
+                    d_active.pop("model_expires_at", None)
+            if not d_active and name in defaults:
+                continue
             overridden[section].add(name)
-            if name not in defaults and not _is_full_row(section, d):
+            if name not in defaults and not _is_full_row(section, d_active):
                 stale[section].add(name)
     return overridden, stale
 
@@ -414,8 +458,13 @@ def reset_route_override(section, name, config=None, routes_path=None, field=Non
         return False
     if field is None:
         del state[section][name]
-    elif field in row:
-        del row[field]
+    elif field in row or (field in ("model", "temporary_override") and any(k in row for k in ("model", "temporary_override", "model_expires_at", "temporary_override_expires_at"))):
+        row.pop(field, None)
+        if field in ("model", "temporary_override"):
+            row.pop("model", None)
+            row.pop("model_expires_at", None)
+            row.pop("temporary_override", None)
+            row.pop("temporary_override_expires_at", None)
     else:
         return False
     save_routes(state, config, routes_path=routes_file)
@@ -471,19 +520,22 @@ def find_client_entry(clients, client, workload_class=None):
     return None
 
 
-def route_model(routes, client, workload_class=None):
+def route_model(routes, client, workload_class=None, now=None):
     """The `model` a routes.json client or class entry pins, else None.
-    The one place a model override lives: callers pass a client and a class, never --model."""
+    Temporary model overrides last up to 5 hours; expired overrides are ignored."""
     entry = find_client_entry((routes or {}).get("clients") or {}, client, workload_class)
-    if (entry or {}).get("model"):
-        return entry["model"]
+    if entry:
+        m = active_model_override(entry, now=now)
+        if m:
+            return m
     if entry and (entry.get("tool") or entry.get("tier")):
         return None
     cls_name = workload_class or (entry or {}).get("class")
     if cls_name:
         cls_def = ((routes or {}).get("classes") or {}).get(cls_name) or {}
-        if cls_def.get("model"):
-            return cls_def["model"]
+        m = active_model_override(cls_def, now=now)
+        if m:
+            return m
     return None
 
 
@@ -641,6 +693,33 @@ def parse_reset_time(reset_str, now=None):
         return dt.astimezone(timezone.utc)
 
     return None
+
+
+def compute_model_override_expires_at(now=None):
+    """Compute ISO-8601 `expires_at` for a temporary model override (up to 5 hours)."""
+    now_dt = now or datetime.now(timezone.utc)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    return (now_dt + timedelta(hours=5)).isoformat()
+
+
+def active_model_override(entry, now=None):
+    """Return the active model name for a client or class entry if a temporary
+    model override (temporary_override) is present and has not expired (`now < expires_at`), else None."""
+    if not isinstance(entry, dict):
+        return None
+    model = entry.get("temporary_override") or entry.get("model")
+    if not model or not isinstance(model, str) or not model.strip():
+        return None
+    exp = entry.get("temporary_override_expires_at") or entry.get("model_expires_at")
+    if exp and isinstance(exp, str):
+        now_dt = now or datetime.now(timezone.utc)
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+        exp_dt = parse_reset_time(exp, now=now_dt)
+        if exp_dt is not None and now_dt >= exp_dt:
+            return None
+    return model.strip()
 
 
 def next_ok_time(result, at=95, group=None, now=None):
@@ -1127,11 +1206,19 @@ def apply_class_route_updates(name, c, config, usage=None, now=None):
             updates["effort"] = c["effort"]
         elif c["effort"] in (None, ""):
             updates["effort"] = None
-    if "model" in c:
-        if isinstance(c["model"], str) and c["model"].strip():
-            updates["model"] = c["model"].strip()
-        elif c["model"] in (None, ""):
+    if "temporary_override" in c or "model" in c:
+        m = c.get("temporary_override") or c.get("model")
+        if isinstance(m, str) and m.strip():
+            exp_iso = compute_model_override_expires_at(now)
+            updates["temporary_override"] = m.strip()
+            updates["temporary_override_expires_at"] = exp_iso
+            updates["model"] = m.strip()
+            updates["model_expires_at"] = exp_iso
+        elif m in (None, ""):
+            reset_route_override("classes", name, config, field="temporary_override")
+            reset_route_override("classes", name, config, field="temporary_override_expires_at")
             reset_route_override("classes", name, config, field="model")
+            reset_route_override("classes", name, config, field="model_expires_at")
     if "fallback" in c:
         fb_raw = c["fallback"]
         if not fb_raw or fb_raw is False:
@@ -1752,13 +1839,19 @@ def build_parser():
     p_set_cls.add_argument("--fallback-model", help="fallback model name (e.g. gemini-4-argon-medium)")
     p_set_cls.add_argument("--no-fallback", action="store_true", help="disable fallback for this class")
 
-    p_set_cli = route_sub.add_parser("set-client")
+    p_set_cli = route_sub.add_parser("set-client", help="configure client routing or a temporary 5-hour model override (temporary_override)")
     p_set_cli.add_argument("name")
     p_set_cli.add_argument("--class", dest="workload_class")
     p_set_cli.add_argument("--tool", choices=TOOLS)
     p_set_cli.add_argument("--tier", choices=TIERS)
     p_set_cli.add_argument("--effort", choices=EFFORTS)
-    p_set_cli.add_argument("--model", help="pin this model for the client (name it `<client>@<class>` to pin it for one class only)")
+    p_set_cli.add_argument("--temporary-override", "--model", dest="temporary_override",
+                           help="temporary model override for the client (lasts up to 5 hours; clients must stop using overrides permanently and reuse or create a workload class in aicli.toml instead)")
+
+    p_temp_ov = route_sub.add_parser("temporary-override", help="set temporary model override for a client (lasts up to 5 hours)")
+    p_temp_ov.add_argument("client", help="client identifier")
+    p_temp_ov.add_argument("model", help="model name to temporarily override to (expires in 5h)")
+    p_temp_ov.add_argument("--hours", type=float, default=5.0, help="override duration in hours (default 5.0, max 5.0)")
 
     p_del_cli = route_sub.add_parser("remove-client")
     p_del_cli.add_argument("name")
@@ -2213,10 +2306,30 @@ def cmd_route(args, config):
             updates["tier"] = args.tier
         if args.effort:
             updates["effort"] = args.effort
-        if args.model:
-            updates["model"] = args.model
+        model_val = getattr(args, "temporary_override", None)
+        if model_val:
+            exp_iso = compute_model_override_expires_at()
+            updates["model"] = model_val
+            updates["model_expires_at"] = exp_iso
+            updates["temporary_override"] = model_val
+            updates["temporary_override_expires_at"] = exp_iso
         entry = apply_route_override("clients", args.name, updates, config)
-        print(f"route updated: client {args.name} -> {entry}")
+        if model_val:
+            print(f"route updated: client {args.name} -> {entry} (temporary_override expires in 5h; clients must reuse or create a workload class in aicli.toml instead of using overrides)")
+        else:
+            print(f"route updated: client {args.name} -> {entry}")
+        return 0
+    elif args.route_command in ("temporary-override", "set-override"):
+        duration = min(float(getattr(args, "hours", 5.0) or 5.0), 5.0)
+        exp_iso = (datetime.now(timezone.utc) + timedelta(hours=duration)).isoformat()
+        updates = {
+            "model": args.model,
+            "model_expires_at": exp_iso,
+            "temporary_override": args.model,
+            "temporary_override_expires_at": exp_iso,
+        }
+        entry = apply_route_override("clients", args.client, updates, config)
+        print(f"temporary_override set: client {args.client} -> {args.model} (expires in {duration:g}h at {exp_iso}; clients must reuse or create a class in aicli.toml rather than relying on overrides)")
         return 0
     elif args.route_command == "remove-client":
         routes_path = default_routes_path(config)
