@@ -102,6 +102,40 @@ class RoutesApiTests(unittest.TestCase):
         self.assertIn('class="scoped "', page)
         self.assertIn('"scope": "pjm:"', page)
 
+    def test_allowance_override_payload_save_preserve_prune_and_clear(self):
+        from datetime import datetime, timedelta, timezone
+        data = routes_api.payload(self.config, {}, scope="pjm:")
+        sd_fb = data["fallback_status"]["classes"]["standard-dev"]
+        self.assertEqual(sd_fb["allowance"], 50)
+        self.assertEqual(sd_fb["effective_at"], 50)
+        self.assertIsNone(sd_fb["allowance_override"])
+
+        # Activate override via save() without expires_at -> computed from now + 5h
+        routes_api.save(self.config, {"classes": {"standard-dev": {"allowance_override": {"pct": 80}}}}, scope="pjm:")
+        data = routes_api.payload(self.config, {}, scope="pjm:")
+        sd_fb = data["fallback_status"]["classes"]["standard-dev"]
+        self.assertEqual(sd_fb["effective_at"], 80)
+        self.assertEqual(sd_fb["allowance_override"]["pct"], 80)
+
+        # Updating another field on standard-dev without allowance_override preserves active override
+        routes_api.save(self.config, {"classes": {"standard-dev": {"effort": "high"}}}, scope="pjm:")
+        saved = json.loads(self.routes.read_text())
+        self.assertEqual(saved["classes"]["standard-dev"]["allowance_override"]["pct"], 80)
+
+        # Clearing allowance_override removes it
+        routes_api.save(self.config, {"classes": {"standard-dev": {"allowance_override": None}}}, scope="pjm:")
+        saved = json.loads(self.routes.read_text())
+        self.assertNotIn("allowance_override", saved.get("classes", {}).get("standard-dev", {}))
+
+        # Expired override is pruned on next save omitting allowance_override
+        past = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        raw = json.loads(self.routes.read_text())
+        raw.setdefault("classes", {}).setdefault("standard-dev", {})["allowance_override"] = {"pct": 80, "expires_at": past}
+        self.routes.write_text(json.dumps(raw))
+        routes_api.save(self.config, {"classes": {"standard-dev": {"effort": "medium"}}}, scope="pjm:")
+        saved = json.loads(self.routes.read_text())
+        self.assertNotIn("allowance_override", saved.get("classes", {}).get("standard-dev", {}))
+
 
 if __name__ == "__main__":
     unittest.main()

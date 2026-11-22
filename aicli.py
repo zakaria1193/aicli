@@ -35,6 +35,9 @@ AVAILABLE_MODELS = {
         "claude-opus-5-5",
     ],
     "agy": [
+        "gemini-4-hydrogen-low",
+        "gemini-4-hydrogen-medium",
+        "gemini-4-hydrogen-high",
         "gemini-4-argon-low",
         "gemini-4-argon-medium",
         "gemini-4-argon-high",
@@ -468,14 +471,17 @@ def find_client_entry(clients, client, workload_class=None):
     return None
 
 
-def route_model(routes, client, workload_class):
+def route_model(routes, client, workload_class=None):
     """The `model` a routes.json client or class entry pins, else None.
     The one place a model override lives: callers pass a client and a class, never --model."""
     entry = find_client_entry((routes or {}).get("clients") or {}, client, workload_class)
     if (entry or {}).get("model"):
         return entry["model"]
-    if workload_class:
-        cls_def = ((routes or {}).get("classes") or {}).get(workload_class) or {}
+    if entry and (entry.get("tool") or entry.get("tier")):
+        return None
+    cls_name = workload_class or (entry or {}).get("class")
+    if cls_name:
+        cls_def = ((routes or {}).get("classes") or {}).get(cls_name) or {}
         if cls_def.get("model"):
             return cls_def["model"]
     return None
@@ -831,9 +837,10 @@ def _read_quota_cache():
 
 
 def _cache_entry_valid_for_timer(hit, at=95, now=None):
-    """True when `hit` is a recent reading whose reset timer (`next_ok_at`) has NOT
-    yet elapsed. Once `now >= next_ok_at`, an exhausted reading is expired and
-    aicli must retest the first choice instead of trusting the old cache."""
+    """True when `hit` is a recent reading whose reset timer (`next_ok_at`) or
+    any bar reset timestamp has NOT yet elapsed. Once `now >= next_ok_at` (or
+    `now >= reset_dt`), the reading is expired and aicli must retest the first
+    choice instead of trusting the old cache."""
     if not isinstance(hit, dict) or not isinstance(hit.get("result"), dict):
         return False
     now_dt = now or datetime.now(timezone.utc)
@@ -846,18 +853,32 @@ def _cache_entry_valid_for_timer(hit, at=95, now=None):
     res = hit["result"]
     if res.get("state") != OK:
         return False
+    hit_dt = datetime.fromtimestamp(hit.get("at", now_ts), timezone.utc)
+    for b in (res.get("bars") or {}).values():
+        if isinstance(b, dict) and b.get("reset"):
+            reset_dt = parse_reset_time(b.get("reset"), now=hit_dt)
+            if reset_dt is not None and now_dt >= reset_dt:
+                return False
+    for gbars in (res.get("groups") or {}).values():
+        if not isinstance(gbars, dict):
+            continue
+        for b in gbars.values():
+            if isinstance(b, dict) and b.get("reset"):
+                reset_dt = parse_reset_time(b.get("reset"), now=hit_dt)
+                if reset_dt is not None and now_dt >= reset_dt:
+                    return False
     pct, _ = meter(res)
     if pct is not None and pct >= at:
         # Exhausted: check if the timer until next OK time has passed!
-        next_ok_iso = hit.get("next_ok_at") or next_ok_time(res, at=at, now=now_dt)
-        next_ok_dt = parse_reset_time(next_ok_iso, now=now_dt)
+        next_ok_iso = hit.get("next_ok_at") or next_ok_time(res, at=at, now=hit_dt)
+        next_ok_dt = parse_reset_time(next_ok_iso, now=hit_dt)
         if next_ok_dt is None or now_dt >= next_ok_dt:
             return False  # Timer elapsed (or unknown): must retest first choice!
     for grp, gbars in (res.get("groups") or {}).items():
         gpct, _ = meter(res, grp)
         if gpct is not None and gpct >= at:
-            g_ok_iso = (hit.get("next_ok_groups") or {}).get(grp) or next_ok_time(res, at=at, group=grp, now=now_dt)
-            g_ok_dt = parse_reset_time(g_ok_iso, now=now_dt)
+            g_ok_iso = (hit.get("next_ok_groups") or {}).get(grp) or next_ok_time(res, at=at, group=grp, now=hit_dt)
+            g_ok_dt = parse_reset_time(g_ok_iso, now=hit_dt)
             if g_ok_dt is None or now_dt >= g_ok_dt:
                 return False
     return True
@@ -1004,20 +1025,181 @@ def meter(result, group=None):
     return top["pct"], top.get("reset", "")
 
 
-def pick_fallback(config, tool, tier, quota, workload_class=None, routes=None, effort=None):
+def _valid_pct(val):
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, int):
+        return val if 1 <= val <= 100 else None
+    if isinstance(val, str) and val.strip().isdigit():
+        v = int(val.strip())
+        return v if 1 <= v <= 100 else None
+    return None
+
+
+def _class_cfg(config, workload_class, routes=None):
+    if not workload_class:
+        return {}
+    if routes is None:
+        routes = load_routes(config)
+    classes = (routes or {}).get("classes") or {}
+    return classes.get(workload_class) or (config.get("classes") or {}).get(workload_class) or {}
+
+
+def class_allowance(cls_cfg):
+    """Base allowance percentage (1..100) defined on `cls_cfg`, or None."""
+    if not isinstance(cls_cfg, dict):
+        return None
+    return _valid_pct(cls_cfg.get("allowance"))
+
+
+def active_allowance_override(cls_cfg, now=None):
+    """Return the active {"pct": int, "expires_at": str} override for `cls_cfg`,
+    or None if missing, invalid, or expired (`now >= expires_at`)."""
+    if not isinstance(cls_cfg, dict):
+        return None
+    ov = cls_cfg.get("allowance_override")
+    if not isinstance(ov, dict):
+        return None
+    pct = _valid_pct(ov.get("pct"))
+    expires_at = ov.get("expires_at")
+    if pct is None or not expires_at or not isinstance(expires_at, str):
+        return None
+    now_dt = now or datetime.now(timezone.utc)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    expires_dt = parse_reset_time(expires_at, now=now_dt)
+    if expires_dt is None or now_dt >= expires_dt:
+        return None
+    return {"pct": pct, "expires_at": expires_dt.isoformat()}
+
+
+def class_primary_at(config, cls_cfg=None, now=None):
+    """Effective primary quota threshold (`primary_at`) for a workload class."""
+    ov = active_allowance_override(cls_cfg, now=now)
+    if ov is not None:
+        return ov["pct"]
+    base = class_allowance(cls_cfg)
+    if base is not None:
+        return base
+    return fallback_at(config)
+
+
+def compute_allowance_expires_at(config, cls_cfg, usage=None, now=None):
+    """Compute ISO-8601 `expires_at` for a 5-hour-slot allowance override from the
+    class primary quota group's `five_hour` reset timestamp, or `now + 5h`."""
+    now_dt = now or datetime.now(timezone.utc)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    tool = (cls_cfg or {}).get("tool") or "claude"
+    tier = (cls_cfg or {}).get("tier") or "default"
+    model = (cls_cfg or {}).get("model") or (config.get(tool, {}).get("tiers") or {}).get(tier)
+    group = infer_agy_group(model) if tool == "agy" else None
+    q_res = (usage or {}).get(tool) if isinstance(usage, dict) else None
+    if q_res is None:
+        hit = (_read_quota_cache() or {}).get(tool) or {}
+        q_res = hit.get("result") if isinstance(hit, dict) else None
+    reset_str = None
+    if isinstance(q_res, dict):
+        if tool == "agy" and group:
+            g_bars = (q_res.get("groups") or {}).get(group) or {}
+            reset_str = (g_bars.get("five_hour") or {}).get("reset")
+        if not reset_str:
+            reset_str = ((q_res.get("bars") or {}).get("five_hour") or {}).get("reset")
+    if reset_str:
+        reset_dt = parse_reset_time(reset_str, now=now_dt)
+        if reset_dt is not None and reset_dt > now_dt:
+            return reset_dt.isoformat()
+    return (now_dt + timedelta(hours=5)).isoformat()
+
+
+def apply_class_route_updates(name, c, config, usage=None, now=None):
+    """Apply a class update dict from /api/ai-routes (or routes_api.save) via
+    `apply_route_override` / `reset_route_override`."""
+    routes = load_routes(config)
+    cls_cfg = (routes.get("classes") or {}).get(name) or {}
+    updates = {}
+    if c.get("tool") in TOOLS:
+        updates["tool"] = c["tool"]
+    if c.get("tier") in TIERS:
+        updates["tier"] = c["tier"]
+    if "effort" in c:
+        if c["effort"] in EFFORTS:
+            updates["effort"] = c["effort"]
+        elif c["effort"] in (None, ""):
+            updates["effort"] = None
+    if "model" in c:
+        if isinstance(c["model"], str) and c["model"].strip():
+            updates["model"] = c["model"].strip()
+        elif c["model"] in (None, ""):
+            reset_route_override("classes", name, config, field="model")
+    if "fallback" in c:
+        fb_raw = c["fallback"]
+        if not fb_raw or fb_raw is False:
+            updates["fallback"] = None
+        else:
+            steps = normalize_fallback_steps(fb_raw)
+            updates["fallback"] = steps[0] if len(steps) == 1 else (steps if steps else None)
+    if "allowance" in c:
+        if c["allowance"] in (None, ""):
+            reset_route_override("classes", name, config, field="allowance")
+        else:
+            pct = _valid_pct(c["allowance"])
+            if pct is not None:
+                updates["allowance"] = pct
+    if "allowance_override" in c:
+        ov_raw = c["allowance_override"]
+        if ov_raw is None or ov_raw is False:
+            reset_route_override("classes", name, config, field="allowance_override")
+        elif isinstance(ov_raw, dict):
+            pct = _valid_pct(ov_raw.get("pct"))
+            if pct is not None:
+                now_dt = now or datetime.now(timezone.utc)
+                if now_dt.tzinfo is None:
+                    now_dt = now_dt.replace(tzinfo=timezone.utc)
+                exp = None
+                raw_exp = ov_raw.get("expires_at")
+                if isinstance(raw_exp, str) and raw_exp.strip():
+                    exp_dt = parse_reset_time(raw_exp, now=now_dt)
+                    if exp_dt is not None and exp_dt > now_dt:
+                        exp = exp_dt.isoformat()
+                if not exp:
+                    effective_cls = {**cls_cfg, **updates}
+                    exp = compute_allowance_expires_at(config, effective_cls, usage=usage, now=now_dt)
+                updates["allowance_override"] = {"pct": pct, "expires_at": exp}
+    else:
+        raw_state = _read_state_file(default_routes_path(config))
+        state_ov = ((raw_state.get("classes") or {}).get(name) or {}).get("allowance_override")
+        if state_ov is not None and active_allowance_override({"allowance_override": state_ov}, now=now) is None:
+            reset_route_override("classes", name, config, field="allowance_override")
+    if updates:
+        apply_route_override("classes", name, updates, config)
+
+
+def pick_fallback(config, tool, tier, quota, workload_class=None, routes=None, effort=None, now=None):
     """The step to run instead of `tool`'s own `tier` model for `workload_class`,
     or None when `tool` has room, has no fallback configured, or every step is out."""
+    if workload_class and routes is None:
+        routes = load_routes(config)
     steps = fallback_steps(config, tool=tool, workload_class=workload_class, routes=routes)
     if not steps:
         return None
+    cls_cfg = _class_cfg(config, workload_class, routes=routes)
     at = fallback_at(config)
-    primary_model = config.get(tool, {}).get("tiers", {}).get(tier)
+    ov = active_allowance_override(cls_cfg, now=now)
+    base_allowance = class_allowance(cls_cfg)
+    primary_at = ov["pct"] if ov is not None else (base_allowance if base_allowance is not None else at)
+    has_allowance_cap = (ov is not None or base_allowance is not None)
+    cls_model = cls_cfg.get("model") if (not cls_cfg.get("tool") or cls_cfg.get("tool") == tool) else None
+    primary_model = cls_model or config.get(tool, {}).get("tiers", {}).get(tier)
     primary_group = infer_agy_group(primary_model) if tool == "agy" else None
     q_res = quota(tool)
     pct, reset = meter(q_res, primary_group)
-    if pct is None or pct < at:
+    if pct is None or pct < primary_at:
         return None
-    next_ok = q_res.get("next_ok_at") or next_ok_time(q_res, at=at, group=primary_group)
+    next_ok = next_ok_time(q_res, at=primary_at, group=primary_group, now=now) or (
+        q_res.get("next_ok_at") if primary_at == at else None
+    )
+    cap_desc = f"allowance cap {primary_at}%" if has_allowance_cap else f"fallback at {primary_at}%"
     for step in steps:
         step_tool = step["tool"]
         step_model = (
@@ -1026,8 +1208,9 @@ def pick_fallback(config, tool, tier, quota, workload_class=None, routes=None, e
             or (config.get(step_tool, {}).get("tiers") or {}).get(step.get("tier") or tier)
         )
         step_group = step.get("group") or (infer_agy_group(step_model) if step_tool == "agy" else None)
+        step_at = _valid_pct(step.get("at")) or at
         step_pct, _ = meter(quota(step_tool), step_group)
-        if step_pct is not None and step_pct >= at:
+        if step_pct is not None and step_pct >= step_at:
             continue
         step_effort = step.get("effort")
         out = {
@@ -1036,7 +1219,7 @@ def pick_fallback(config, tool, tier, quota, workload_class=None, routes=None, e
             "group": step_group,
             "from_tool": tool,
             "from_model": primary_model,
-            "reason": f"{tool} quota {pct}% used (fallback at {at}%)" + (f", resets {reset}" if reset else ""),
+            "reason": f"{tool} quota {pct}% used ({cap_desc})" + (f", resets {reset}" if reset else ""),
         }
         if step_effort:
             out["effort"] = step_effort
@@ -1046,7 +1229,7 @@ def pick_fallback(config, tool, tier, quota, workload_class=None, routes=None, e
     return None
 
 
-def fallback_status(config, usage, routes=None):
+def fallback_status(config, usage, routes=None, now=None):
     """Per-class (and optional per-tool) fallback status as the cockpit and CLI show it."""
     if routes is None:
         routes = load_routes(config)
@@ -1059,14 +1242,18 @@ def fallback_status(config, usage, routes=None):
         tool = cls_cfg.get("tool", "claude")
         tier = cls_cfg.get("tier", "default")
         effort = cls_cfg.get("effort")
-        primary_model = config.get(tool, {}).get("tiers", {}).get(tier, "unknown")
+        primary_model = cls_cfg.get("model") or config.get(tool, {}).get("tiers", {}).get(tier, "unknown")
         primary_group = infer_agy_group(primary_model) if tool == "agy" else None
+        base_allowance = class_allowance(cls_cfg)
+        active_ov = active_allowance_override(cls_cfg, now=now)
+        primary_at = active_ov["pct"] if active_ov is not None else (base_allowance if base_allowance is not None else at)
         q_res = quota_fn(tool)
         p_pct, p_reset = meter(q_res, primary_group)
-        p_exhausted = p_pct is not None and p_pct >= at
-        next_ok = (q_res or {}).get("next_ok_at") or (
-            next_ok_time(q_res, at=at, group=primary_group) if p_exhausted else None
-        )
+        p_exhausted = p_pct is not None and p_pct >= primary_at
+        next_ok = (
+            next_ok_time(q_res, at=primary_at, group=primary_group, now=now)
+            or ((q_res or {}).get("next_ok_at") if primary_at == at else None)
+        ) if p_exhausted else None
 
         cfg_steps = fallback_steps(config, tool=tool, workload_class=cls_name, routes=routes)
         rows = [{
@@ -1077,6 +1264,7 @@ def fallback_status(config, usage, routes=None):
             "label": f"{tool}: {primary_model}",
             "pct": p_pct,
             "reset": p_reset,
+            "at": primary_at,
             "exhausted": p_exhausted,
             "active": False,
         }]
@@ -1088,8 +1276,9 @@ def fallback_status(config, usage, routes=None):
                 or (config.get(s_tool, {}).get("tiers") or {}).get(s.get("tier") or tier)
             )
             s_group = s.get("group") or (infer_agy_group(s_model) if s_tool == "agy" else None)
+            s_at = _valid_pct(s.get("at")) or at
             s_pct, s_reset = meter(quota_fn(s_tool), s_group)
-            s_exhausted = s_pct is not None and s_pct >= at
+            s_exhausted = s_pct is not None and s_pct >= s_at
             rows.append({
                 "tool": s_tool,
                 "group": s_group,
@@ -1098,6 +1287,7 @@ def fallback_status(config, usage, routes=None):
                 "label": s.get("label") or f"{s_tool}: {s_model}",
                 "pct": s_pct,
                 "reset": s_reset,
+                "at": s_at,
                 "exhausted": s_exhausted,
                 "active": False,
             })
@@ -1106,7 +1296,7 @@ def fallback_status(config, usage, routes=None):
         for i, r in enumerate(rows):
             r["active"] = (i == active_idx)
 
-        fb = pick_fallback(config, tool, tier, quota_fn, workload_class=cls_name, routes=routes, effort=effort)
+        fb = pick_fallback(config, tool, tier, quota_fn, workload_class=cls_name, routes=routes, effort=effort, now=now)
         if not p_exhausted:
             state = "ok"
         elif fb is not None:
@@ -1120,6 +1310,9 @@ def fallback_status(config, usage, routes=None):
             "effort": effort,
             "model": primary_model,
             "group": primary_group,
+            "allowance": base_allowance,
+            "effective_at": primary_at,
+            "allowance_override": active_ov,
             "primary_pct": p_pct,
             "primary_reset": p_reset,
             "primary_exhausted": p_exhausted,
@@ -1578,6 +1771,13 @@ def build_parser():
     p_reset_cli.add_argument("name")
     p_reset_cli.add_argument("--field", help="drop only this field; omit to drop the whole override")
 
+    p_set_allow = route_sub.add_parser("set-allowance", help="set a temporary 5-hour-slot allowance override (1..100)")
+    p_set_allow.add_argument("pct", help="allowance percentage (1..100)")
+    p_set_allow.add_argument("--class", dest="workload_class", default="standard-dev", help="workload class (default: standard-dev)")
+
+    p_clr_allow = route_sub.add_parser("clear-allowance", help="clear a class's temporary allowance override")
+    p_clr_allow.add_argument("--class", dest="workload_class", default="standard-dev", help="workload class (default: standard-dev)")
+
     p_auth = sub.add_parser("auth", help="manage and check CLI authentication")
     auth_sub = p_auth.add_subparsers(dest="auth_command", required=True)
     p_auth_status = auth_sub.add_parser("status", help="check authentication status of CLIs")
@@ -1945,13 +2145,13 @@ def cmd_routes(args, config):
         for name, c in classes.items():
             tool = c.get("tool", "claude")
             tier = c.get("tier", "default")
-            model = config.get(tool, {}).get("tiers", {}).get(tier, "")
+            model = c.get("model") or config.get(tool, {}).get("tiers", {}).get(tier, "")
             out["classes"][name] = {**c, "model": model, "overridden": name in overridden["classes"],
                                      "stale": name in stale["classes"]}
         for name, c in clients.items():
             tool = c.get("tool")
             tier = c.get("tier")
-            model = config.get(tool, {}).get("tiers", {}).get(tier, "") if tool and tier else ""
+            model = c.get("model") or (config.get(tool, {}).get("tiers", {}).get(tier, "") if tool and tier else "")
             out["clients"][name] = {**c, "model": model, "overridden": name in overridden["clients"],
                                      "stale": name in stale["clients"]}
         print(json.dumps(out, indent=2))
@@ -1962,7 +2162,7 @@ def cmd_routes(args, config):
         tool = c.get("tool", "claude")
         tier = c.get("tier", "default")
         effort = c.get("effort")
-        model = config.get(tool, {}).get("tiers", {}).get(tier, "")
+        model = c.get("model") or config.get(tool, {}).get("tiers", {}).get(tier, "")
         eff_str = f", effort: {effort}" if effort else ""
         fb_steps = normalize_fallback_steps(c.get("fallback"))
         fb_str = f", fallback: {fb_steps[0]['tool']}/{fb_steps[0].get('model', '')}" if fb_steps else ", fallback: none"
@@ -2041,6 +2241,33 @@ def cmd_route(args, config):
             return 0
         print(f"client {args.name} has no override" + (f" for field {args.field}" if args.field else ""), file=sys.stderr)
         return 1
+    elif args.route_command == "set-allowance":
+        pct = _valid_pct(args.pct)
+        if pct is None:
+            print(f"aicli: allowance pct must be an integer between 1 and 100, got {args.pct!r}", file=sys.stderr)
+            return 2
+        known_classes = load_routes(config)["classes"]
+        cls_name = args.workload_class
+        if cls_name not in known_classes:
+            known = ", ".join(sorted(known_classes))
+            print(f"aicli: unknown workload class {cls_name!r} (known: {known})", file=sys.stderr)
+            return 2
+        exp = compute_allowance_expires_at(config, known_classes[cls_name])
+        apply_route_override("classes", cls_name, {"allowance_override": {"pct": pct, "expires_at": exp}}, config)
+        print(f"route updated: class {cls_name} allowance override -> {pct}% until {exp}")
+        return 0
+    elif args.route_command == "clear-allowance":
+        cls_name = args.workload_class
+        known_classes = load_routes(config)["classes"]
+        if cls_name not in known_classes:
+            known = ", ".join(sorted(known_classes))
+            print(f"aicli: unknown workload class {cls_name!r} (known: {known})", file=sys.stderr)
+            return 2
+        if reset_route_override("classes", cls_name, config, field="allowance_override"):
+            print(f"class {cls_name} allowance override cleared")
+        else:
+            print(f"class {cls_name} has no allowance override")
+        return 0
     return 1
 
 

@@ -495,7 +495,8 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual((tool, tier), ("claude", "deep"))
 
             tool, tier, effort, cls = aicli.resolve_route(config, workload_class="standard-dev")
-            self.assertEqual((tool, tier), ("claude", "default"))
+            self.assertEqual((tool, tier), ("agy", "default"))
+            self.assertEqual(aicli.route_model(aicli.load_routes(config), None, "standard-dev"), "gemini-4-hydrogen-medium")
 
     def test_resolve_route_unknown_class_raises(self):
         with tempfile.TemporaryDirectory() as d:
@@ -618,15 +619,15 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(res.returncode, 0)
             data = json.loads(res.stdout)
             self.assertEqual(data["class"], "standard-dev")
-            self.assertEqual(data["tool"], "claude")
-            self.assertEqual(data["model"], "claude-sonnet-5")
+            self.assertEqual(data["tool"], "agy")
+            self.assertEqual(data["model"], "gemini-4-hydrogen-medium")
             self.assertIn("quota", data)
 
     def test_run_meta_out(self):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d))
             meta_file = Path(d) / "run.meta.json"
-            # FAKE_CLI fake-claude will be execv'd
+            # FAKE_CLI fake-agy will be execv'd
             res = subprocess.run(
                 [sys.executable, str(AICLI), "run", "--class", "standard-dev", "--client", "pjm:test:run-1",
                  "--meta-out", str(meta_file), "--", "echo", "hello"],
@@ -638,8 +639,8 @@ class RoutingTests(unittest.TestCase):
             data = json.loads(meta_file.read_text())
             self.assertEqual(data["client"], "pjm:test:run-1")
             self.assertEqual(data["class"], "standard-dev")
-            self.assertEqual(data["tool"], "claude")
-            self.assertEqual(data["model"], "claude-sonnet-5")
+            self.assertEqual(data["tool"], "agy")
+            self.assertEqual(data["model"], "gemini-4-hydrogen-medium")
             self.assertIn("quota", data)
 
     def test_run_meta_out_reports_the_callers_own_model(self):
@@ -783,7 +784,8 @@ class RoutingTests(unittest.TestCase):
 
             # Test hierarchical match for ticket run
             tool, tier, effort, cls = aicli.resolve_route(config, client="pjm:p-0001:auto-execute", routes=routes)
-            self.assertEqual((tool, tier, cls), ("claude", "default", "standard-dev"))
+            self.assertEqual((tool, tier, cls), ("agy", "default", "standard-dev"))
+            self.assertEqual(aicli.route_model(routes, "pjm:p-0001:auto-execute", "standard-dev"), "gemini-4-hydrogen-medium")
 
             # Test hierarchical match for maintainer run
             tool, tier, effort, cls = aicli.resolve_route(config, client="pjm:maintainer:homelab:routine", routes=routes)
@@ -821,6 +823,17 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(aicli.route_model(routes, "pjm:p-0001:auto-spec", "deep-spec"), "claude-opus-5-5")
             self.assertEqual(aicli.route_model(routes, "pjm:p-0001:auto-spec", "standard-dev"), "claude-sonnet-5")
             self.assertIsNone(aicli.route_model(routes, "pjm:p-0001:auto-plan", "deep-spec"))
+            self.assertEqual(aicli.route_model(routes, "pjm:p-0001:auto-execute", "standard-dev"), "gemini-4-hydrogen-medium")
+            # A client override that changes tool or tier without pinning a model does not apply the class's pinned model.
+            routes["clients"]["pjm:custom-tool"] = {"class": "standard-dev", "tool": "claude"}
+            routes["clients"]["pjm:custom-tier"] = {"class": "standard-dev", "tier": "low"}
+            self.assertIsNone(aicli.route_model(routes, "pjm:custom-tool", "standard-dev"))
+            self.assertIsNone(aicli.route_model(routes, "pjm:custom-tier", "standard-dev"))
+
+    def test_available_models_includes_hydrogen_variants(self):
+        for m in ("gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-high"):
+            self.assertIn(m, aicli.AVAILABLE_MODELS["agy"])
+            self.assertEqual(aicli.infer_agy_group(m), "Gemini Models")
 
     def test_optiplex_projects_load_and_save(self):
         with tempfile.TemporaryDirectory() as d:
@@ -930,6 +943,14 @@ if __name__ == "__main__":
 CLAUDE_OUT = """Current session: 20% used · resets Oct 22, 3:49am (Europe/Paris)
 Current week (all models): 98% used · resets Oct 26, 5:59pm (Europe/Paris)
 """
+CLAUDE_ROOM = """Current session: 20% used · resets Oct 22, 3:49am (Europe/Paris)
+Current week (all models): 60% used · resets Oct 26, 5:59pm (Europe/Paris)
+"""
+AGY_UNDER_50 = """Gemini Models\tWeekly Limit Remaining\t70%\t2026-10-23T22:43:51Z
+Gemini Models\tFive Hour Limit Remaining\t60%\t2026-10-22T02:33:30Z
+Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-28T21:47:44Z
+Gemini 4 Argon\tGemini 4 Argon Weekly Limit\t93%\t2026-10-27T22:01:20Z
+"""
 AGY_ROOM = """Gemini Models\tWeekly Limit Remaining\t40%\t2026-10-23T22:43:51Z
 Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-28T21:47:44Z
 Gemini 4 Argon\tGemini 4 Argon Weekly Limit\t93%\t2026-10-27T22:01:20Z
@@ -945,8 +966,17 @@ def reading(reset="Oct 26, 5:59pm (Europe/Paris)", **bars):
 
 
 def agy_reading(**groups):
-    return {"state": "ok", "detail": "", "bars": {},
-            "groups": {g.replace("_", " "): {"weekly": {"pct": v, "reset": "2026-10-27T22:01:20Z"}} for g, v in groups.items()}}
+    out_groups = {}
+    for g, v in groups.items():
+        name = g.replace("_", " ")
+        if isinstance(v, dict):
+            out_groups[name] = {
+                period: (val if isinstance(val, dict) else {"pct": val, "reset": "2026-10-27T22:01:20Z"})
+                for period, val in v.items()
+            }
+        else:
+            out_groups[name] = {"weekly": {"pct": v, "reset": "2026-10-27T22:01:20Z"}}
+    return {"state": "ok", "detail": "", "bars": {}, "groups": out_groups}
 
 
 class FallbackTests(unittest.TestCase):
@@ -962,10 +992,10 @@ class FallbackTests(unittest.TestCase):
         os.environ["AICLI_QUOTA_CACHE"] = self._old_cache
         self._dir.cleanup()
 
-    def pick(self, claude, agy, workload_class="standard-dev", tier="default", routes=None):
+    def pick(self, claude, agy, workload_class="conversation", tier="default", routes=None, tool="claude", now=None):
         return aicli.pick_fallback(
-            self.config, "claude", tier, {"claude": claude, "agy": agy}.get,
-            workload_class=workload_class, routes=routes,
+            self.config, tool, tier, {"claude": claude, "agy": agy}.get,
+            workload_class=workload_class, routes=routes, now=now,
         )
 
     def test_claude_with_room_stays_on_claude(self):
@@ -977,12 +1007,92 @@ class FallbackTests(unittest.TestCase):
         self.assertEqual(aicli.fallback_at(self.config), 97)
         self.assertIsNone(self.pick(reading(weekly=96, five_hour=10), agy_reading(**{"Gemini 4 Argon": 7})))
 
-    def test_standard_dev_falls_back_to_agy_gemini_4_argon_medium(self):
+    def test_conversation_falls_back_to_agy_gemini_4_argon_medium(self):
         fb = self.pick(reading(weekly=98, five_hour=10), agy_reading(**{"Gemini 4 Argon": 7}))
         self.assertEqual((fb["tool"], fb["model"], fb["group"]), ("agy", "gemini-4-argon-medium", "Gemini 4 Argon"))
         self.assertEqual(fb["from_model"], "claude-sonnet-5")
         self.assertIn("98%", fb["reason"])
+        self.assertIn("fallback at 97%", fb["reason"])
         self.assertTrue(fb.get("next_ok_at"))
+
+    def test_standard_dev_stays_on_agy_hydrogen_medium_under_50_allowance(self):
+        fb = self.pick(
+            reading(weekly=20, five_hour=10),
+            agy_reading(Gemini_Models={"five_hour": 49, "weekly": 30}),
+            workload_class="standard-dev",
+            tool="agy",
+        )
+        self.assertIsNone(fb)
+
+    def test_standard_dev_falls_back_to_claude_sonnet_5_when_five_hour_or_weekly_reaches_50(self):
+        # 1. five_hour reaches 50%, weekly < 50%, claude at 60% (< 97% global threshold)
+        fb_5h = self.pick(
+            reading(weekly=60, five_hour=20),
+            agy_reading(Gemini_Models={
+                "five_hour": {"pct": 50, "reset": "2026-10-22T02:33:30Z"},
+                "weekly": {"pct": 30, "reset": "2026-10-27T22:01:20Z"},
+            }),
+            workload_class="standard-dev",
+            tool="agy",
+        )
+        self.assertIsNotNone(fb_5h)
+        self.assertEqual((fb_5h["tool"], fb_5h["model"], fb_5h["effort"]), ("claude", "claude-sonnet-5", "medium"))
+        self.assertEqual((fb_5h["from_tool"], fb_5h["from_model"]), ("agy", "gemini-4-hydrogen-medium"))
+        self.assertIn("allowance cap 50%", fb_5h["reason"])
+        self.assertEqual(fb_5h["next_ok_at"], "2026-10-22T02:33:30+00:00")
+
+        # 2. weekly reaches 55% while five_hour < 50%
+        fb_wk = self.pick(
+            reading(weekly=60, five_hour=20),
+            agy_reading(Gemini_Models={"five_hour": 20, "weekly": 55}),
+            workload_class="standard-dev",
+            tool="agy",
+        )
+        self.assertIsNotNone(fb_wk)
+        self.assertEqual((fb_wk["tool"], fb_wk["model"], fb_wk["effort"]), ("claude", "claude-sonnet-5", "medium"))
+        self.assertIn("55% used (allowance cap 50%)", fb_wk["reason"])
+
+    def test_standard_dev_temporary_allowance_override_and_expiry(self):
+        from datetime import datetime, timezone
+        now = datetime(2026, 11, 22, 18, 0, tzinfo=timezone.utc)
+        routes_active = aicli.load_routes(self.config)
+        routes_active["classes"]["standard-dev"]["allowance_override"] = {
+            "pct": 80,
+            "expires_at": "2026-11-22T23:00:00+00:00",
+        }
+        # At 60% used (< 80% override), stays on agy
+        self.assertIsNone(self.pick(
+            reading(weekly=20),
+            agy_reading(Gemini_Models={"five_hour": 60, "weekly": 40}),
+            workload_class="standard-dev",
+            tool="agy",
+            routes=routes_active,
+            now=now,
+        ))
+        # At 80% used (>= 80% override), falls back to claude-sonnet-5
+        fb_80 = self.pick(
+            reading(weekly=20),
+            agy_reading(Gemini_Models={"five_hour": 80, "weekly": 40}),
+            workload_class="standard-dev",
+            tool="agy",
+            routes=routes_active,
+            now=now,
+        )
+        self.assertIsNotNone(fb_80)
+        self.assertIn("allowance cap 80%", fb_80["reason"])
+
+        # After expires_at (23:01 UTC), override is expired and primary_at reverts to 50%
+        after = datetime(2026, 11, 22, 23, 1, tzinfo=timezone.utc)
+        fb_expired = self.pick(
+            reading(weekly=20),
+            agy_reading(Gemini_Models={"five_hour": 60, "weekly": 40}),
+            workload_class="standard-dev",
+            tool="agy",
+            routes=routes_active,
+            now=after,
+        )
+        self.assertIsNotNone(fb_expired)
+        self.assertIn("allowance cap 50%", fb_expired["reason"])
 
     def test_deep_spec_opus_has_no_fallback(self):
         fb = self.pick(
@@ -997,8 +1107,14 @@ class FallbackTests(unittest.TestCase):
         fb = self.pick(reading(weekly=10, five_hour=100), agy_reading(**{"Gemini 4 Argon": 10}))
         self.assertEqual(fb["model"], "gemini-4-argon-medium")
 
-    def test_every_step_out_stays_on_claude(self):
+    def test_every_step_out_stays_on_primary(self):
         self.assertIsNone(self.pick(reading(weekly=100), agy_reading(**{"Gemini 4 Argon": 99})))
+        self.assertIsNone(self.pick(
+            reading(weekly=97),
+            agy_reading(Gemini_Models=60),
+            workload_class="standard-dev",
+            tool="agy",
+        ))
 
     def test_an_unknown_claude_reading_never_falls_back(self):
         self.assertIsNone(self.pick({"state": "unknown", "bars": {}}, agy_reading(**{"Gemini 4 Argon": 0})))
@@ -1008,16 +1124,29 @@ class FallbackTests(unittest.TestCase):
 
     def test_status_marks_per_class_state(self):
         status = aicli.fallback_status(self.config, {
-            "claude": reading(weekly=98),
+            "claude": reading(weekly=40),
             "agy": agy_reading(Gemini_Models=60, **{"Gemini 4 Argon": 7}),
         })
         classes = status["classes"]
         self.assertEqual(classes["standard-dev"]["state"], "fallback")
-        self.assertEqual(classes["standard-dev"]["effective_tool"], "agy")
-        self.assertEqual(classes["standard-dev"]["effective_model"], "gemini-4-argon-medium")
-        self.assertEqual(classes["deep-spec"]["state"], "blocked")
-        self.assertIsNone(classes["deep-spec"]["fallback"])
+        self.assertEqual(classes["standard-dev"]["model"], "gemini-4-hydrogen-medium")
+        self.assertEqual(classes["standard-dev"]["allowance"], 50)
+        self.assertEqual(classes["standard-dev"]["effective_at"], 50)
+        self.assertEqual(classes["standard-dev"]["effective_tool"], "claude")
+        self.assertEqual(classes["standard-dev"]["effective_model"], "claude-sonnet-5")
+        self.assertEqual(classes["standard-dev"]["effective_effort"], "medium")
         self.assertEqual(classes["maintenance"]["state"], "ok")
+
+        # When both agy (>= 50%) and claude (>= 97%) are exhausted, standard-dev is blocked
+        status_blocked = aicli.fallback_status(self.config, {
+            "claude": reading(weekly=98),
+            "agy": agy_reading(Gemini_Models=60, **{"Gemini 4 Argon": 7}),
+        })
+        self.assertEqual(status_blocked["classes"]["standard-dev"]["state"], "blocked")
+        self.assertEqual(status_blocked["classes"]["conversation"]["state"], "fallback")
+        self.assertEqual(status_blocked["classes"]["conversation"]["effective_model"], "gemini-4-argon-medium")
+        self.assertEqual(status_blocked["classes"]["deep-spec"]["state"], "blocked")
+        self.assertIsNone(status_blocked["classes"]["deep-spec"]["fallback"])
 
     def test_agy_usage_keeps_every_group_including_argon(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1051,6 +1180,19 @@ class FallbackTests(unittest.TestCase):
         )
         self.assertEqual(got_after["state"], "unknown")
 
+        # 3. A cached reading at 55% (< 97% global threshold, but >= 50% allowance cap)
+        # also expires once its bar's reset timestamp passes!
+        agy_55 = {
+            "state": "ok",
+            "detail": "",
+            "bars": {"five_hour": {"pct": 55, "reset": "2026-10-22T01:50:00Z", "group": "Gemini Models"}},
+            "groups": {"Gemini Models": {"five_hour": {"pct": 55, "reset": "2026-10-22T01:50:00Z"}}},
+        }
+        aicli._cached_quota("agy", agy_55, at=97, now=t_exhausted)
+        hit = aicli._read_quota_cache().get("agy")
+        self.assertTrue(aicli._cache_entry_valid_for_timer(hit, at=97, now=t_before))
+        self.assertFalse(aicli._cache_entry_valid_for_timer(hit, at=97, now=t_after))
+
     def test_check_quota_verifies_fixtures_and_warns_on_wording_change(self):
         report = aicli.check_quota_health(self.config, live=False)
         self.assertTrue(report["ok"], report["errors"])
@@ -1071,13 +1213,13 @@ class FallbackTests(unittest.TestCase):
 
 
 class FallbackCliTests(unittest.TestCase):
-    """`aicli run/resolve` against the fake CLIs, with the Claude plan at 98%."""
+    """`aicli run/resolve` against the fake CLIs."""
 
-    def run_cli(self, *args, agy=AGY_ROOM):
+    def run_cli(self, *args, claude=CLAUDE_ROOM, agy=AGY_ROOM):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             config_path, _ = make_config(d)
-            (d / "claude.txt").write_text(CLAUDE_OUT)
+            (d / "claude.txt").write_text(claude)
             (d / "agy.txt").write_text(agy)
             log = d / "usage.jsonl"
             res = subprocess.run(
@@ -1089,31 +1231,47 @@ class FallbackCliTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         return res.stdout, rows
 
-    def test_run_standard_dev_moves_to_agy_gemini_4_argon_medium(self):
-        out, rows = self.run_cli("run", "--class", "standard-dev", "--client", "x:y", "--", "-p", "hi")
-        self.assertEqual(json.loads(out), [str(FAKE_CLI / "fake-agy"), "--model", "gemini-4-argon-medium", "-p", "hi"])
+    def test_run_standard_dev_stays_on_agy_hydrogen_medium_under_50_pct(self):
+        out, rows = self.run_cli("run", "--class", "standard-dev", "--client", "pjm:auto-execute", "--", "-p", "hi", agy=AGY_UNDER_50)
+        self.assertEqual(json.loads(out), [str(FAKE_CLI / "fake-agy"), "--model", "gemini-4-hydrogen-medium", "-p", "hi"])
         self.assertEqual(rows[-1]["tool"], "agy")
-        self.assertEqual(rows[-1]["model"], "gemini-4-argon-medium")
-        self.assertEqual(rows[-1]["fallback"]["from_tool"], "claude")
-        self.assertEqual(rows[-1]["fallback"]["group"], "Gemini 4 Argon")
+        self.assertEqual(rows[-1]["model"], "gemini-4-hydrogen-medium")
+        self.assertNotIn("fallback", rows[-1])
+
+    def test_run_standard_dev_moves_to_claude_sonnet_5_when_agy_reaches_50_pct(self):
+        # AGY_ROOM has Gemini Models 40% remaining (60% used >= 50% allowance); CLAUDE_ROOM has 60% used (< 97%)
+        out, rows = self.run_cli("run", "--class", "standard-dev", "--client", "x:y", "--", "-p", "hi")
+        self.assertEqual(
+            json.loads(out),
+            [str(FAKE_CLI / "fake-claude"), "--model", "claude-sonnet-5", "--effort", "medium", "-p", "hi"],
+        )
+        self.assertEqual(rows[-1]["tool"], "claude")
+        self.assertEqual(rows[-1]["model"], "claude-sonnet-5")
+        self.assertEqual(rows[-1]["fallback"]["from_tool"], "agy")
+        self.assertEqual(rows[-1]["fallback"]["from_model"], "gemini-4-hydrogen-medium")
+        self.assertIn("allowance cap 50%", rows[-1]["fallback"]["reason"])
 
     def test_run_deep_spec_has_no_fallback_and_stays_on_claude(self):
-        out, rows = self.run_cli("run", "--class", "deep-spec", "--client", "x:y", "--", "-p", "hi")
+        out, rows = self.run_cli("run", "--class", "deep-spec", "--client", "x:y", "--", "-p", "hi", claude=CLAUDE_OUT)
         self.assertEqual(json.loads(out), [str(FAKE_CLI / "fake-claude"), "--model", "claude-opus-5-5", "-p", "hi"])
         self.assertNotIn("fallback", rows[-1])
 
-    def test_run_drops_the_callers_claude_model_on_fallback(self):
-        out, _ = self.run_cli("run", "--class", "standard-dev", "--", "--model", "claude-sonnet-5", "-p", "hi")
-        self.assertEqual(json.loads(out), [str(FAKE_CLI / "fake-agy"), "--model", "gemini-4-argon-medium", "-p", "hi"])
+    def test_run_drops_the_callers_agy_model_on_fallback(self):
+        out, _ = self.run_cli("run", "--class", "standard-dev", "--", "--model", "gemini-4-hydrogen-medium", "-p", "hi")
+        self.assertEqual(
+            json.loads(out),
+            [str(FAKE_CLI / "fake-claude"), "--model", "claude-sonnet-5", "--effort", "medium", "-p", "hi"],
+        )
 
     def test_no_fallback_flag(self):
         out, _ = self.run_cli("run", "--no-fallback", "--class", "standard-dev", "--", "-p", "hi")
-        self.assertEqual(json.loads(out)[0], str(FAKE_CLI / "fake-claude"))
+        self.assertEqual(json.loads(out)[0], str(FAKE_CLI / "fake-agy"))
 
-    def test_resolve_stays_on_claude_when_argon_is_exhausted(self):
-        out, _ = self.run_cli("resolve", "--class", "standard-dev", "--json", agy=AGY_ARGON_OUT)
+    def test_resolve_stays_on_agy_when_claude_fallback_is_exhausted(self):
+        out, _ = self.run_cli("resolve", "--class", "standard-dev", "--json", claude=CLAUDE_OUT)
         data = json.loads(out)
-        self.assertEqual(data["tool"], "claude")
+        self.assertEqual(data["tool"], "agy")
+        self.assertEqual(data["model"], "gemini-4-hydrogen-medium")
         self.assertIsNone(data["fallback"])
 
     def test_route_set_class_can_configure_and_clear_fallback(self):
@@ -1146,11 +1304,14 @@ class FallbackCliTests(unittest.TestCase):
             self.assertIsNone(saved2["classes"]["standard-dev"]["fallback"])
 
     def test_fallback_command_json(self):
-        out, _ = self.run_cli("fallback", "--json")
+        out, _ = self.run_cli("fallback", "--json", claude=CLAUDE_ROOM, agy=AGY_ROOM)
         data = json.loads(out)
         self.assertEqual(data["classes"]["standard-dev"]["state"], "fallback")
-        self.assertEqual(data["classes"]["standard-dev"]["effective_model"], "gemini-4-argon-medium")
-        self.assertEqual(data["classes"]["deep-spec"]["state"], "blocked")
+        self.assertEqual(data["classes"]["standard-dev"]["effective_model"], "claude-sonnet-5")
+        out_blocked, _ = self.run_cli("fallback", "--json", claude=CLAUDE_OUT, agy=AGY_ROOM)
+        data_blocked = json.loads(out_blocked)
+        self.assertEqual(data_blocked["classes"]["deep-spec"]["state"], "blocked")
+        self.assertEqual(data_blocked["classes"]["standard-dev"]["state"], "blocked")
 
 
 class NoProbeWithoutFallbackTests(unittest.TestCase):
@@ -1180,7 +1341,7 @@ class NoProbeWithoutFallbackTests(unittest.TestCase):
     def test_run_standard_dev_has_a_fallback_and_probes(self):
         res, probed = self._run("run", "--class", "standard-dev", "--", "-p", "hi")
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertIn("claude", probed)
+        self.assertIn("agy", probed)
 
     def test_meta_out_absent_when_no_fallback_and_no_cache(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1238,3 +1399,57 @@ class AuthCliTests(unittest.TestCase):
         res_sub = aicli.submit_code(cfg, "claude", "valid-code")
         self.assertTrue(res_sub.get("ok"))
         self.assertIn("authenticated", res_sub.get("message", ""))
+
+
+class AllowanceCliTests(unittest.TestCase):
+    def test_set_and_clear_allowance_cli(self):
+        with tempfile.TemporaryDirectory() as d:
+            dp = Path(d)
+            config_path, _ = make_config(dp)
+            routes_path = dp / "routes.json"
+            quota_path = dp / "quota.json"
+            future_reset = "2099-01-01T05:00:00Z"
+            quota_path.write_text(json.dumps({
+                "agy": {
+                    "at": 1700000000.0,
+                    "result": {
+                        "state": "ok",
+                        "groups": {"Gemini Models": {"five_hour": {"pct": 55, "reset": future_reset}}},
+                    },
+                }
+            }))
+            env = {
+                **os.environ,
+                "AICLI_CONFIG": str(config_path),
+                "AICLI_ROUTES": str(routes_path),
+                "AICLI_QUOTA_CACHE": str(quota_path),
+            }
+
+            r_bad = subprocess.run(
+                [sys.executable, str(AICLI), "route", "set-allowance", "101"],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(r_bad.returncode, 2)
+
+            r_bad_str = subprocess.run(
+                [sys.executable, str(AICLI), "route", "set-allowance", "abc"],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(r_bad_str.returncode, 2)
+
+            r_ok = subprocess.run(
+                [sys.executable, str(AICLI), "route", "set-allowance", "80"],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(r_ok.returncode, 0, r_ok.stderr)
+            saved = json.loads(routes_path.read_text())
+            self.assertEqual(saved["classes"]["standard-dev"]["allowance_override"]["pct"], 80)
+            self.assertEqual(saved["classes"]["standard-dev"]["allowance_override"]["expires_at"], "2099-01-01T05:00:00+00:00")
+
+            r_clr = subprocess.run(
+                [sys.executable, str(AICLI), "route", "clear-allowance"],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(r_clr.returncode, 0, r_clr.stderr)
+            saved = json.loads(routes_path.read_text())
+            self.assertNotIn("allowance_override", saved.get("classes", {}).get("standard-dev", {}))

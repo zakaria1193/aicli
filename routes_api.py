@@ -138,23 +138,11 @@ def save(config, body, scope=""):
                        if not scope or n in {_class_of(c, routes["clients"][c]) for c in visible_clients}}
 
     if isinstance(body.get("classes"), dict):
+        usage = cached_usage()
         for name, c in body["classes"].items():
             if not isinstance(c, dict) or name not in routes["classes"] or name not in visible_classes:
                 continue
-            updates = {}
-            if c.get("tool") in aicli.TOOLS:
-                updates["tool"] = c["tool"]
-            if c.get("tier") in aicli.TIERS:
-                updates["tier"] = c["tier"]
-            if "effort" in c:
-                if c["effort"] in efforts:
-                    updates["effort"] = c["effort"]
-                elif c["effort"] in (None, ""):
-                    updates["effort"] = None
-            if "fallback" in c:
-                updates["fallback"] = _fallback_update(c["fallback"])
-            if updates:
-                aicli.apply_route_override("classes", name, updates, config)
+            aicli.apply_class_route_updates(name, c, config, usage=usage)
 
     if isinstance(body.get("clients"), dict):
         for name, c in body["clients"].items():
