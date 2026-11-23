@@ -792,9 +792,16 @@ class RoutingTests(unittest.TestCase):
             tool, tier, effort, cls = aicli.resolve_route(config, client="pjm:maintainer:homelab:routine", routes=routes)
             self.assertEqual((tool, tier, cls), ("agy", "low", "maintenance"))
 
-    def test_shipped_routine_maintainer_runs_on_agy_flash_medium(self):
+    def test_configured_routine_maintainer_runs_on_agy_flash_medium(self):
         config = aicli.load_config(ROOT / "aicli.toml")
-        classes, clients, _ = aicli._default_sections(config)
+        classes, _, _ = aicli._default_sections(config)
+        clients = {
+            "pjm:maintainer:routine": {
+                "class": "maintenance",
+                "tool": "agy",
+                "model": "gemini-3.8-flash-medium",
+            }
+        }
         routes = {"classes": classes, "clients": clients}
         client = "pjm:maintainer:salsa-social:routine"
         self.assertEqual(aicli.resolve_route(config, client=client, workload_class="maintenance",
@@ -803,9 +810,16 @@ class RoutingTests(unittest.TestCase):
         # a deep run is not pinned by it
         self.assertIsNone(aicli.route_model(routes, "pjm:maintainer:salsa-social:deep", "maintenance"))
 
-    def test_shipped_scrum_master_runs_on_agy_low(self):
+    def test_configured_scrum_master_runs_on_agy_low(self):
         config = aicli.load_config(ROOT / "aicli.toml")
-        classes, clients, _ = aicli._default_sections(config)
+        classes, _, _ = aicli._default_sections(config)
+        clients = {
+            "pjm:scrum-master": {
+                "class": "managerial-audit",
+                "tool": "agy",
+                "tier": "low",
+            }
+        }
         got = aicli.resolve_route(config, client="pjm:scrum-master", workload_class="managerial-audit",
                                   routes={"classes": classes, "clients": clients})
         self.assertEqual(got[:2], ("agy", "low"))

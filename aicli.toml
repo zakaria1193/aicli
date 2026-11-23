@@ -37,11 +37,8 @@ deep = "gemini-4-hydrogen-high"
 # group still has room. Before falling back, `aicli` relies on the reset timer
 # (`next_ok_at`) and retests the primary choice once the reset window arrives.
 
-# Keep `at` equal to the pause threshold of the callers that gate on Claude usage (pjm's
-# PJM_QUOTA_PAUSE, 97 by default). Below it the primary is still worth using: with a lower
-# `at`, runs moved to the fallback while the caller still counted the primary as available,
-# and the fallback's own small pool emptied first (pjm, 2026-11-08: Argon 19% -> 66% in 30 min
-# while Claude still had room).
+# Keep `at` equal to the pause threshold of callers that gate on Claude usage (97 by default).
+# Below it the primary is still worth using.
 [fallback]
 at = 97
 
@@ -77,38 +74,6 @@ frequency = "4 times / day (07:30, 12:00, 17:00, 22:00)"
 tool = "agy"
 tier = "low"
 
-# The Scrum master's scheduled sweep (stuck tickets, paused work, the daily report) is
-# bookkeeping: it must never run on Opus. The client row pins it to agy at low effort even
-# if the managerial-audit class is later pointed somewhere else.
-[clients."pjm:scrum-master"]
-class = "managerial-audit"
-tool = "agy"
-tier = "low"
-
-# The routine maintainer runs on agy, at medium thinking (Zak, 2026-11-10): Flash low wrote
-# salsa-social reports that ended on "Waiting for npm run e2e…" and named branches that did
-# not exist. Sonnet would do better but its quota is kept for ticket work. Deep runs keep the
-# maintenance class as it is.
-[clients."pjm:maintainer:routine"]
-class = "maintenance"
-tool = "agy"
-model = "gemini-3.8-flash-medium"
-
-# The product-related agents (Product lead pjm:product:<project> on every project, Slack and
-# voice; idea-stem brainstorm pjm:stems) run on Gemini 4 Hydrogen through
-# agy (Zak, 2026-11-17). Official route, not an override: callers still pass only client and
-# class. Medium effort (Zak). The Designer stays on Claude (Zak),
-# like the Chief of staff and Tech lead, on its class route.
-[clients."pjm:product"]
-class = "conversation-deep"
-tool = "agy"
-model = "gemini-4-hydrogen-medium"
-
-[clients."pjm:stems"]
-class = "brainstorm"
-tool = "agy"
-model = "gemini-4-hydrogen-medium"
-
 [classes.brainstorm]
 description = "Divergent idea generation: exploring an opportunity into angles and ideas"
 frequency = "On-demand, a few calls a day"
@@ -117,7 +82,7 @@ tier = "deep"
 fallback = { tool = "agy", model = "gemini-4-argon-medium", group = "Gemini 4 Argon" }
 
 [classes.conversation]
-description = "Talking to a project agent (pjm Chief of staff, Tech lead): quick, turn by turn"
+description = "Talking to a project agent: quick, turn by turn"
 frequency = "On-demand, interactive"
 tool = "claude"
 tier = "default"
@@ -125,7 +90,7 @@ effort = "medium"
 fallback = { tool = "agy", model = "gemini-4-argon-medium", group = "Gemini 4 Argon" }
 
 [classes.conversation-deep]
-description = "Talking to a project agent that must think and push back (pjm Product lead, Designer)"
+description = "Talking to a project agent that must think and push back"
 frequency = "On-demand, interactive"
 tool = "claude"
 tier = "deep"
@@ -150,7 +115,7 @@ tool = "agy"
 tier = "deep"
 
 [classes.deploy-engineer]
-description = "Deploying a finished ticket and checking it live (pjm deploy step); doubts the plan and thinks for itself"
+description = "Deploying a finished ticket and checking live status"
 frequency = "A few runs a day, after CI green"
 tool = "claude"
 tier = "deep"
@@ -160,9 +125,3 @@ description = "Direct interactive human terminal sessions"
 frequency = "On-demand by user"
 tool = "claude"
 tier = "default"
-
-# The pjm deploy step (auto-deploy, pjm-0032) runs as the deploy engineer, on Opus for now
-# (Zak, 2026-11-18). No fallback: a deploy waits for Claude rather than moving to another model.
-# Mode auto and the playwright MCP are set by the pjm workflow step, not here.
-[clients."pjm:deploy"]
-class = "deploy-engineer"
