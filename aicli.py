@@ -1057,6 +1057,11 @@ def fallback_at(config):
     return int(config.get("fallback", {}).get("at", DEFAULT_FALLBACK_AT))
 
 
+def fallback_reserve(config):
+    """Guaranteed quota reserve percentage (0..99), default 0."""
+    return _valid_pct(config.get("fallback", {}).get("reserve")) or 0
+
+
 def normalize_fallback_steps(raw):
     """Normalize a class or tool `fallback` config into a list of valid step dicts."""
     if not raw or raw is False:
@@ -1152,15 +1157,35 @@ def active_allowance_override(cls_cfg, now=None):
     return {"pct": pct, "expires_at": expires_dt.isoformat()}
 
 
+def tool_has_critical_classes(config, tool):
+    """Return True if any workload class on `tool` is configured with priority='critical'."""
+    classes = config.get("classes", {})
+    return any(
+        (c.get("tool") or "claude") == tool and c.get("priority") == "critical"
+        for c in classes.values()
+    )
+
+
 def class_primary_at(config, cls_cfg=None, now=None):
-    """Effective primary quota threshold (`primary_at`) for a workload class."""
+    """Effective primary quota threshold (`primary_at`) for a workload class.
+    1. Active temporary allowance override (5h slot).
+    2. Explicit class-level `allowance` (legacy/manual override).
+    3. If priority == 'critical': gets full quota ceiling (fallback_at).
+    4. Standard priority classes yield at (100 - reserve)% on tools with critical classes to guarantee headroom."""
     ov = active_allowance_override(cls_cfg, now=now)
     if ov is not None:
         return ov["pct"]
     base = class_allowance(cls_cfg)
     if base is not None:
         return base
-    return fallback_at(config)
+    at = fallback_at(config)
+    reserve = fallback_reserve(config)
+    if reserve > 0:
+        priority = (cls_cfg or {}).get("priority", "standard")
+        tool = (cls_cfg or {}).get("tool") or "claude"
+        if priority != "critical" and tool_has_critical_classes(config, tool):
+            return min(at, max(1, 100 - reserve))
+    return at
 
 
 def compute_allowance_expires_at(config, cls_cfg, usage=None, now=None):
@@ -1206,6 +1231,11 @@ def apply_class_route_updates(name, c, config, usage=None, now=None):
             updates["effort"] = c["effort"]
         elif c["effort"] in (None, ""):
             updates["effort"] = None
+    if "priority" in c:
+        if c["priority"] in ("critical", "standard"):
+            updates["priority"] = c["priority"]
+        elif c["priority"] in (None, ""):
+            reset_route_override("classes", name, config, field="priority")
     if "temporary_override" in c or "model" in c:
         m = c.get("temporary_override") or c.get("model")
         if isinstance(m, str) and m.strip():
@@ -1272,9 +1302,10 @@ def pick_fallback(config, tool, tier, quota, workload_class=None, routes=None, e
         return None
     cls_cfg = _class_cfg(config, workload_class, routes=routes)
     at = fallback_at(config)
+    reserve = fallback_reserve(config)
     ov = active_allowance_override(cls_cfg, now=now)
     base_allowance = class_allowance(cls_cfg)
-    primary_at = ov["pct"] if ov is not None else (base_allowance if base_allowance is not None else at)
+    primary_at = class_primary_at(config, cls_cfg=cls_cfg, now=now)
     has_allowance_cap = (ov is not None or base_allowance is not None)
     cls_model = cls_cfg.get("model") if (not cls_cfg.get("tool") or cls_cfg.get("tool") == tool) else None
     primary_model = cls_model or config.get(tool, {}).get("tiers", {}).get(tier)
@@ -1286,7 +1317,12 @@ def pick_fallback(config, tool, tier, quota, workload_class=None, routes=None, e
     next_ok = next_ok_time(q_res, at=primary_at, group=primary_group, now=now) or (
         q_res.get("next_ok_at") if primary_at == at else None
     )
-    cap_desc = f"allowance cap {primary_at}%" if has_allowance_cap else f"fallback at {primary_at}%"
+    if has_allowance_cap:
+        cap_desc = f"allowance cap {primary_at}%"
+    elif reserve > 0 and (cls_cfg or {}).get("priority") != "critical" and tool_has_critical_classes(config, tool):
+        cap_desc = f"reserve yield at {primary_at}% (reserve: {reserve}%)"
+    else:
+        cap_desc = f"fallback at {primary_at}%"
     for step in steps:
         step_tool = step["tool"]
         step_model = (
@@ -1333,7 +1369,7 @@ def fallback_status(config, usage, routes=None, now=None):
         primary_group = infer_agy_group(primary_model) if tool == "agy" else None
         base_allowance = class_allowance(cls_cfg)
         active_ov = active_allowance_override(cls_cfg, now=now)
-        primary_at = active_ov["pct"] if active_ov is not None else (base_allowance if base_allowance is not None else at)
+        primary_at = class_primary_at(config, cls_cfg=cls_cfg, now=now)
         q_res = quota_fn(tool)
         p_pct, p_reset = meter(q_res, primary_group)
         p_exhausted = p_pct is not None and p_pct >= primary_at
@@ -1395,6 +1431,7 @@ def fallback_status(config, usage, routes=None, now=None):
             "tool": tool,
             "tier": tier,
             "effort": effort,
+            "priority": cls_cfg.get("priority", "standard"),
             "model": primary_model,
             "group": primary_group,
             "allowance": base_allowance,
@@ -1416,7 +1453,7 @@ def fallback_status(config, usage, routes=None, now=None):
             "all_exhausted": active_idx is None,
         }
 
-    chains = {"at": at, "classes": classes_out}
+    chains = {"at": at, "reserve": fallback_reserve(config), "classes": classes_out}
     for tool in TOOLS:
         steps = fallback_steps(config, tool=tool)
         if not steps:
@@ -1835,6 +1872,7 @@ def build_parser():
     p_set_cls.add_argument("--tool", required=True, choices=TOOLS)
     p_set_cls.add_argument("--tier", default="default", choices=TIERS)
     p_set_cls.add_argument("--effort", choices=EFFORTS)
+    p_set_cls.add_argument("--priority", choices=["critical", "standard"], help="workload priority tier (critical runs up to fallback ceiling; standard yields at reserve threshold)")
     p_set_cls.add_argument("--fallback-tool", choices=TOOLS, help="fallback tool when primary quota is exhausted")
     p_set_cls.add_argument("--fallback-model", help="fallback model name (e.g. gemini-4-argon-medium)")
     p_set_cls.add_argument("--no-fallback", action="store_true", help="disable fallback for this class")
@@ -2281,6 +2319,8 @@ def cmd_route(args, config):
         updates = {"tool": args.tool, "tier": args.tier}
         if getattr(args, "effort", None):
             updates["effort"] = args.effort
+        if getattr(args, "priority", None):
+            updates["priority"] = args.priority
         if getattr(args, "no_fallback", False):
             updates["fallback"] = None
         elif getattr(args, "fallback_tool", None) and getattr(args, "fallback_model", None):

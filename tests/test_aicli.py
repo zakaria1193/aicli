@@ -102,8 +102,10 @@ def _to_toml(cfg):
     if "fallback" in cfg:
         lines.append("\n[fallback]")
         lines.append(f"at = {cfg['fallback']['at']}")
+        if "reserve" in cfg["fallback"]:
+            lines.append(f"reserve = {cfg['fallback']['reserve']}")
         for tool, steps in cfg["fallback"].items():
-            if tool == "at":
+            if tool in ("at", "reserve"):
                 continue
             for step in steps:
                 lines.append(f"\n[[fallback.{tool}]]")
@@ -1043,7 +1045,7 @@ Gemini Models\tFive Hour Limit Remaining\t60%\t2026-10-22T02:33:30Z
 Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-28T21:47:44Z
 Gemini 4 Argon\tGemini 4 Argon Weekly Limit\t93%\t2026-10-27T22:01:20Z
 """
-AGY_ROOM = """Gemini Models\tWeekly Limit Remaining\t40%\t2026-10-23T22:43:51Z
+AGY_ROOM = """Gemini Models\tWeekly Limit Remaining\t15%\t2026-10-23T22:43:51Z
 Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-28T21:47:44Z
 Gemini 4 Argon\tGemini 4 Argon Weekly Limit\t93%\t2026-10-27T22:01:20Z
 """
@@ -1107,21 +1109,21 @@ class FallbackTests(unittest.TestCase):
         self.assertIn("fallback at 97%", fb["reason"])
         self.assertTrue(fb.get("next_ok_at"))
 
-    def test_standard_dev_stays_on_agy_hydrogen_medium_under_50_allowance(self):
+    def test_standard_dev_stays_on_agy_hydrogen_medium_under_reserve_threshold(self):
         fb = self.pick(
             reading(weekly=20, five_hour=10),
-            agy_reading(Gemini_Models={"five_hour": 49, "weekly": 30}),
+            agy_reading(Gemini_Models={"five_hour": 79, "weekly": 30}),
             workload_class="standard-dev",
             tool="agy",
         )
         self.assertIsNone(fb)
 
-    def test_standard_dev_falls_back_to_claude_sonnet_5_when_five_hour_or_weekly_reaches_50(self):
-        # 1. five_hour reaches 50%, weekly < 50%, claude at 60% (< 97% global threshold)
+    def test_standard_dev_falls_back_when_reserve_threshold_reached(self):
+        # 1. five_hour reaches 80% (100 - reserve: 20%), weekly < 80%, claude at 60% (< 97% global threshold)
         fb_5h = self.pick(
             reading(weekly=60, five_hour=20),
             agy_reading(Gemini_Models={
-                "five_hour": {"pct": 50, "reset": "2026-10-22T02:33:30Z"},
+                "five_hour": {"pct": 80, "reset": "2026-10-22T02:33:30Z"},
                 "weekly": {"pct": 30, "reset": "2026-10-27T22:01:20Z"},
             }),
             workload_class="standard-dev",
@@ -1130,61 +1132,86 @@ class FallbackTests(unittest.TestCase):
         self.assertIsNotNone(fb_5h)
         self.assertEqual((fb_5h["tool"], fb_5h["model"], fb_5h["effort"]), ("claude", "claude-sonnet-5", "medium"))
         self.assertEqual((fb_5h["from_tool"], fb_5h["from_model"]), ("agy", "gemini-4-hydrogen-medium"))
-        self.assertIn("allowance cap 50%", fb_5h["reason"])
+        self.assertIn("reserve yield at 80% (reserve: 20%)", fb_5h["reason"])
         self.assertEqual(fb_5h["next_ok_at"], "2026-10-22T02:33:30+00:00")
 
-        # 2. weekly reaches 55% while five_hour < 50%
+        # 2. weekly reaches 85% while five_hour < 80%
         fb_wk = self.pick(
             reading(weekly=60, five_hour=20),
-            agy_reading(Gemini_Models={"five_hour": 20, "weekly": 55}),
+            agy_reading(Gemini_Models={"five_hour": 20, "weekly": 85}),
             workload_class="standard-dev",
             tool="agy",
         )
         self.assertIsNotNone(fb_wk)
         self.assertEqual((fb_wk["tool"], fb_wk["model"], fb_wk["effort"]), ("claude", "claude-sonnet-5", "medium"))
-        self.assertIn("55% used (allowance cap 50%)", fb_wk["reason"])
+        self.assertIn("85% used (reserve yield at 80% (reserve: 20%))", fb_wk["reason"])
+
+    def test_critical_priority_classes_use_full_quota_ceiling(self):
+        # maintenance has priority = "critical", so at 85% used (above standard 80% cap), it stays on agy
+        fb_crit = self.pick(
+            reading(weekly=60, five_hour=20),
+            agy_reading(Gemini_Models={"five_hour": 85, "weekly": 85}),
+            workload_class="maintenance",
+            tool="agy",
+        )
+        self.assertIsNone(fb_crit)
+
+        # But when quota reaches fallback_at (97%), even critical classes fall back if a fallback exists
+        # or error out if no fallback
+        routes_with_fb = aicli.load_routes(self.config)
+        routes_with_fb["classes"]["maintenance"]["fallback"] = {"tool": "claude", "model": "claude-haiku-5-5"}
+        fb_97 = self.pick(
+            reading(weekly=60, five_hour=20),
+            agy_reading(Gemini_Models={"five_hour": 97, "weekly": 97}),
+            workload_class="maintenance",
+            tool="agy",
+            routes=routes_with_fb,
+        )
+        self.assertIsNotNone(fb_97)
+        self.assertEqual((fb_97["tool"], fb_97["model"]), ("claude", "claude-haiku-5-5"))
+        self.assertIn("fallback at 97%", fb_97["reason"])
 
     def test_standard_dev_temporary_allowance_override_and_expiry(self):
         from datetime import datetime, timezone
         now = datetime(2026, 11, 22, 18, 0, tzinfo=timezone.utc)
         routes_active = aicli.load_routes(self.config)
         routes_active["classes"]["standard-dev"]["allowance_override"] = {
-            "pct": 80,
+            "pct": 90,
             "expires_at": "2026-11-22T23:00:00+00:00",
         }
-        # At 60% used (< 80% override), stays on agy
+        # At 85% used (< 90% override), stays on agy
         self.assertIsNone(self.pick(
             reading(weekly=20),
-            agy_reading(Gemini_Models={"five_hour": 60, "weekly": 40}),
+            agy_reading(Gemini_Models={"five_hour": 85, "weekly": 40}),
             workload_class="standard-dev",
             tool="agy",
             routes=routes_active,
             now=now,
         ))
-        # At 80% used (>= 80% override), falls back to claude-sonnet-5
-        fb_80 = self.pick(
+        # At 90% used (>= 90% override), falls back to claude-sonnet-5
+        fb_90 = self.pick(
             reading(weekly=20),
-            agy_reading(Gemini_Models={"five_hour": 80, "weekly": 40}),
+            agy_reading(Gemini_Models={"five_hour": 90, "weekly": 40}),
             workload_class="standard-dev",
             tool="agy",
             routes=routes_active,
             now=now,
         )
-        self.assertIsNotNone(fb_80)
-        self.assertIn("allowance cap 80%", fb_80["reason"])
+        self.assertIsNotNone(fb_90)
+        self.assertIn("allowance cap 90%", fb_90["reason"])
 
-        # After expires_at (23:01 UTC), override is expired and primary_at reverts to 50%
+        # After expires_at (23:01 UTC), override is expired and primary_at reverts to reserve yield (80%)
         after = datetime(2026, 11, 22, 23, 1, tzinfo=timezone.utc)
         fb_expired = self.pick(
             reading(weekly=20),
-            agy_reading(Gemini_Models={"five_hour": 60, "weekly": 40}),
+            agy_reading(Gemini_Models={"five_hour": 85, "weekly": 40}),
             workload_class="standard-dev",
             tool="agy",
             routes=routes_active,
             now=after,
         )
         self.assertIsNotNone(fb_expired)
-        self.assertIn("allowance cap 50%", fb_expired["reason"])
+        self.assertIn("reserve yield at 80% (reserve: 20%)", fb_expired["reason"])
 
     def test_deep_spec_opus_has_no_fallback(self):
         fb = self.pick(
@@ -1217,22 +1244,25 @@ class FallbackTests(unittest.TestCase):
     def test_status_marks_per_class_state(self):
         status = aicli.fallback_status(self.config, {
             "claude": reading(weekly=40),
-            "agy": agy_reading(Gemini_Models=60, **{"Gemini 4 Argon": 7}),
+            "agy": agy_reading(Gemini_Models=85, **{"Gemini 4 Argon": 7}),
         })
         classes = status["classes"]
         self.assertEqual(classes["standard-dev"]["state"], "fallback")
         self.assertEqual(classes["standard-dev"]["model"], "gemini-4-hydrogen-medium")
-        self.assertEqual(classes["standard-dev"]["allowance"], 50)
-        self.assertEqual(classes["standard-dev"]["effective_at"], 50)
+        self.assertIsNone(classes["standard-dev"]["allowance"])
+        self.assertEqual(classes["standard-dev"]["effective_at"], 80)
+        self.assertEqual(classes["standard-dev"]["priority"], "standard")
         self.assertEqual(classes["standard-dev"]["effective_tool"], "claude")
         self.assertEqual(classes["standard-dev"]["effective_model"], "claude-sonnet-5")
         self.assertEqual(classes["standard-dev"]["effective_effort"], "medium")
         self.assertEqual(classes["maintenance"]["state"], "ok")
+        self.assertEqual(classes["maintenance"]["priority"], "critical")
+        self.assertEqual(classes["maintenance"]["effective_at"], 97)
 
-        # When both agy (>= 50%) and claude (>= 97%) are exhausted, standard-dev is blocked
+        # When both agy (>= 80%) and claude (>= 97%) are exhausted, standard-dev is blocked
         status_blocked = aicli.fallback_status(self.config, {
             "claude": reading(weekly=98),
-            "agy": agy_reading(Gemini_Models=60, **{"Gemini 4 Argon": 7}),
+            "agy": agy_reading(Gemini_Models=85, **{"Gemini 4 Argon": 7}),
         })
         self.assertEqual(status_blocked["classes"]["standard-dev"]["state"], "blocked")
         self.assertEqual(status_blocked["classes"]["conversation"]["state"], "fallback")
@@ -1323,15 +1353,15 @@ class FallbackCliTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         return res.stdout, rows
 
-    def test_run_standard_dev_stays_on_agy_hydrogen_medium_under_50_pct(self):
+    def test_run_standard_dev_stays_on_agy_hydrogen_medium_under_reserve_threshold(self):
         out, rows = self.run_cli("run", "--class", "standard-dev", "--client", "pjm:auto-execute", "--", "-p", "hi", agy=AGY_UNDER_50)
         self.assertEqual(json.loads(out), [str(FAKE_CLI / "fake-agy"), "--model", "gemini-4-hydrogen-medium", "-p", "hi"])
         self.assertEqual(rows[-1]["tool"], "agy")
         self.assertEqual(rows[-1]["model"], "gemini-4-hydrogen-medium")
         self.assertNotIn("fallback", rows[-1])
 
-    def test_run_standard_dev_moves_to_claude_sonnet_5_when_agy_reaches_50_pct(self):
-        # AGY_ROOM has Gemini Models 40% remaining (60% used >= 50% allowance); CLAUDE_ROOM has 60% used (< 97%)
+    def test_run_standard_dev_moves_to_claude_sonnet_5_when_agy_reaches_reserve_threshold(self):
+        # AGY_ROOM has Gemini Models 15% remaining (85% used >= 80% reserve cap); CLAUDE_ROOM has 60% used (< 97%)
         out, rows = self.run_cli("run", "--class", "standard-dev", "--client", "x:y", "--", "-p", "hi")
         self.assertEqual(
             json.loads(out),
@@ -1341,7 +1371,7 @@ class FallbackCliTests(unittest.TestCase):
         self.assertEqual(rows[-1]["model"], "claude-sonnet-5")
         self.assertEqual(rows[-1]["fallback"]["from_tool"], "agy")
         self.assertEqual(rows[-1]["fallback"]["from_model"], "gemini-4-hydrogen-medium")
-        self.assertIn("allowance cap 50%", rows[-1]["fallback"]["reason"])
+        self.assertIn("reserve yield at 80% (reserve: 20%)", rows[-1]["fallback"]["reason"])
 
     def test_run_deep_spec_has_no_fallback_and_stays_on_claude(self):
         out, rows = self.run_cli("run", "--class", "deep-spec", "--client", "x:y", "--", "-p", "hi", claude=CLAUDE_OUT)

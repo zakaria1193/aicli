@@ -41,6 +41,8 @@ deep = "gemini-4-hydrogen-high"
 # Below it the primary is still worth using.
 [fallback]
 at = 97
+# Reserve 20% quota for critical background maintenance & audits. Standard dev yields at 80%.
+reserve = 20
 
 # --- Workload Classes & Routing ----------------------------------------------
 # Callers can pass `--class <name>` and optional `--client <id>` instead of
@@ -52,6 +54,7 @@ description = "Repository maintenance, CI fixes, security dependency updates"
 frequency = "Daily/Weekly background batch"
 tool = "agy"
 tier = "low"
+priority = "critical"
 
 [classes.deep-spec]
 description = "Complex architecture, multi-file specs, and deep PR reviews"
@@ -65,7 +68,6 @@ frequency = "High burst during active work"
 tool = "agy"
 tier = "default"
 model = "gemini-4-hydrogen-medium"
-allowance = 50
 fallback = { tool = "claude", model = "claude-sonnet-5", effort = "medium" }
 
 [classes.managerial-audit]
@@ -73,6 +75,7 @@ description = "Cross-project status auditing, watchdog, and scheduled scrum repo
 frequency = "4 times / day (07:30, 12:00, 17:00, 22:00)"
 tool = "agy"
 tier = "low"
+priority = "critical"
 
 [classes.brainstorm]
 description = "Divergent idea generation: exploring an opportunity into angles and ideas"

@@ -106,8 +106,9 @@ class RoutesApiTests(unittest.TestCase):
         from datetime import datetime, timedelta, timezone
         data = routes_api.payload(self.config, {}, scope="pjm:")
         sd_fb = data["fallback_status"]["classes"]["standard-dev"]
-        self.assertEqual(sd_fb["allowance"], 50)
-        self.assertEqual(sd_fb["effective_at"], 50)
+        self.assertIsNone(sd_fb["allowance"])
+        self.assertEqual(sd_fb["effective_at"], 80)
+        self.assertEqual(data["fallback_status"]["reserve"], 20)
         self.assertIsNone(sd_fb["allowance_override"])
 
         # Activate override via save() without expires_at -> computed from now + 5h
