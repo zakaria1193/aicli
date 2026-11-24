@@ -395,6 +395,18 @@ class JobTests(unittest.TestCase):
         agy = json.loads(self.argv("t-agy", "--prompt", "x").stdout)
         self.assertNotIn("--remote-control", agy)
 
+    def test_chrome_is_claude_only_and_ignored_on_agy(self):
+        claude = json.loads(self.argv("t-claude", "--chrome", "--prompt", "x").stdout)
+        self.assertIn("--chrome", claude)
+        agy = json.loads(self.argv("t-agy", "--chrome", "--prompt", "x").stdout)
+        self.assertNotIn("--chrome", agy)
+
+    def test_without_chrome_nothing_changes(self):
+        claude = json.loads(self.argv("t-claude", "--prompt", "x").stdout)
+        self.assertNotIn("--chrome", claude)
+        agy = json.loads(self.argv("t-agy", "--prompt", "x").stdout)
+        self.assertNotIn("--chrome", agy)
+
     def test_the_router_not_the_caller_picks_the_cli_for_the_same_job(self):
         job = ("--prompt", "hi", "--output-format", "json")
         claude = json.loads(self.argv("t-claude", *job).stdout)

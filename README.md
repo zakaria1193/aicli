@@ -80,6 +80,7 @@ aicli run --client demo --class lightweight-task -- -p "say hi"
 | `conversation` | talking to a project agent, quick answers (pjm Chief of staff, Tech lead) |
 | `conversation-deep` | talking to a project agent that must think and push back (pjm Product lead, Designer) |
 | `deploy-engineer` | deploying a finished change and checking it live (pjm deploy step) |
+| `google-chrome-handler` | browser-authenticated tasks needing Claude in Chrome (pjm owner-approved restart) |
 | `interactive-shell` | a human at a terminal |
 
 **Clients** name the caller, like `myrepo:summarize`. A client maps to a
@@ -150,6 +151,7 @@ whichever CLI the router picked, so a caller never knows or names the CLI.
 | `--settings F` (hooks) / `--mcp-config F` | `--settings`, `--strict-mcp-config --mcp-config` | ignored |
 | `--permission-mode dontAsk\|auto\|bypass` | `--permission-mode` (`bypass` is `bypassPermissions`) | only `bypass` (`--dangerously-skip-permissions`); agy's own otherwise |
 | `--remote-control` | `--remote-control` (Remote Control on at start) | `--remote-control` (same) |
+| `--chrome` | `--chrome` (enable Claude in Chrome integration) | ignored (agy has no Claude in Chrome) |
 
 Pass a prompt that may start with `-` as `--prompt=-text`. Everything after `--`
 is appended verbatim and is only for a human at a terminal

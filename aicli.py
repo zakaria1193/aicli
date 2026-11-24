@@ -127,7 +127,8 @@ def infer_agy_group(model):
 OUTPUT_FORMATS = ("json", "stream-json")
 PERMISSION_MODES = ("dontAsk", "auto", "bypass")
 JOB_FIELDS = ("prompt", "system_prompt_file", "session_id", "resume", "conversation", "name", "settings",
-              "mcp_config", "permission_mode", "output_format", "oneshot", "interactive", "remote_control")
+              "mcp_config", "permission_mode", "output_format", "oneshot", "interactive", "remote_control",
+              "chrome")
 
 
 class JobError(ValueError):
@@ -170,6 +171,8 @@ def _job_claude(job, extra):
         out += ["--name", job["name"]]
     if job.get("remote_control"):
         out.append("--remote-control")
+    if job.get("chrome"):
+        out.append("--chrome")
     if job.get("mcp_config"):
         # --mcp-config swallows every argument up to the next option: it must
         # never come right before the prompt.
@@ -1820,6 +1823,7 @@ def build_parser():
         p.add_argument("--oneshot", action="store_true", help="print the answer and exit")
         p.add_argument("--interactive", action="store_true", help="stay open for a human to type into (agy: -i instead of -p)")
         p.add_argument("--remote-control", action="store_true", help="enable Remote Control at start (claude: --remote-control; agy: --remote-control)")
+        p.add_argument("--chrome", action="store_true", help="enable Claude in Chrome integration (claude: --chrome; agy: ignored)")
 
     p_argv = sub.add_parser("argv")
     add_tool_args(p_argv)
