@@ -2317,6 +2317,121 @@ def cancel_login(config, tool):
         return {"ok": True}
 
 
+_AUTO_REAUTH_CODE_RE = re.compile(r"AUTH_CODE=([^\s\"'`<>]+)")
+
+
+def auto_reauth(config, tool, timeout=90):
+    """Attempt automatic browser re-auth for `tool` (`agy`) using the
+    `google-chrome-handler` workload class (Claude in Chrome).
+
+    Safety guards:
+    - Never uses the same tool being re-authenticated (refuses if
+      `google-chrome-handler` resolves to `tool` or is not `claude`).
+    - Skips immediately if `claude` itself is not authenticated.
+    - Never attempts to bypass passwords, 2FA, or CAPTCHAs; falls back cleanly
+      with a fresh clickable `auth_url` for manual sign-in.
+    """
+    if tool != "agy":
+        res = start_login(config, tool)
+        return {
+            "ok": False,
+            "auto_reauthed": False,
+            "error": f"auto-reauth via google-chrome-handler is only supported for agy",
+            **({"auth_url": res["auth_url"]} if res.get("auth_url") else {}),
+        }
+
+    started = start_login(config, "agy")
+    auth_url = started.get("auth_url")
+    if not started.get("ok") or not auth_url:
+        return {"ok": False, "auto_reauthed": False, "error": started.get("error") or "Could not obtain AGY OAuth URL"}
+
+    # Guard 1: verify `google-chrome-handler` exists and resolves to a DIFFERENT tool (claude).
+    try:
+        resolved = resolve_route(config, workload_class="google-chrome-handler")
+    except (SystemExit, Exception) as exc:
+        return {
+            "ok": False,
+            "auto_reauthed": False,
+            "auth_url": auth_url,
+            "error": f"google-chrome-handler class unavailable: {exc}",
+        }
+    helper_tool = resolved[0] if isinstance(resolved, (tuple, list)) and resolved else (
+        resolved.get("tool") if isinstance(resolved, dict) else None
+    )
+    if not helper_tool or helper_tool == tool or helper_tool != "claude":
+        return {
+            "ok": False,
+            "auto_reauthed": False,
+            "auth_url": auth_url,
+            "error": f"Refusing auto-reauth: google-chrome-handler resolved to {helper_tool!r} (must be claude, not {tool!r})",
+        }
+
+    # Guard 2: verify the helper CLI (claude) is itself authenticated before invoking it.
+    if not auth_status(config, helper_tool).get("authenticated"):
+        return {
+            "ok": False,
+            "auto_reauthed": False,
+            "auth_url": auth_url,
+            "error": f"Helper CLI {helper_tool!r} is not authenticated; skipping auto-reauth",
+        }
+
+    prompt = (
+        "Complete this already-signed-in Google OAuth consent flow for Antigravity (agy) using Claude in Chrome.\n"
+        f"1. Open this exact URL in Chrome: {auth_url}\n"
+        "2. If Google shows an already-signed-in account chooser, select the account and click Continue / Allow.\n"
+        "3. STOP IMMEDIATELY and output AUTH_BLOCKED if Google asks for a password, 2FA, CAPTCHA, or security challenge.\n"
+        "4. If the callback page displays an authorization code, output ONLY a single line: AUTH_CODE=<code>\n"
+        "5. If sign-in completes automatically with no code to copy, output ONLY: AUTH_DONE"
+    )
+    cmd = [
+        sys.executable, str(Path(__file__).resolve()),
+        "run",
+        "--class", "google-chrome-handler",
+        "--client", "aicli:auto-reauth-agy",
+        "--oneshot",
+        "--chrome",
+        "--permission-mode", "bypass",
+        "--prompt", prompt,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            timeout=timeout, check=False,
+        )
+        output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        fresh = start_login(config, "agy")
+        return {
+            "ok": False,
+            "auto_reauthed": False,
+            "auth_url": fresh.get("auth_url") or auth_url,
+            "error": f"google-chrome-handler auto-reauth failed: {exc}",
+        }
+
+    match = _AUTO_REAUTH_CODE_RE.search(output)
+    if match:
+        sub = submit_code(config, "agy", match.group(1))
+        if sub.get("ok"):
+            return {"ok": True, "auto_reauthed": True, "message": "agy auto-reauthenticated via google-chrome-handler"}
+        return {
+            "ok": False,
+            "auto_reauthed": False,
+            "auth_url": sub.get("auth_url") or auth_url,
+            "error": sub.get("error") or "Submitted code from chrome was not accepted",
+        }
+
+    if auth_status(config, "agy").get("authenticated"):
+        return {"ok": True, "auto_reauthed": True, "message": "agy auto-reauthenticated via google-chrome-handler"}
+
+    fresh = start_login(config, "agy")
+    return {
+        "ok": False,
+        "auto_reauthed": False,
+        "auth_url": fresh.get("auth_url") or auth_url,
+        "error": "Auto-reauth via google-chrome-handler did not complete; manual sign-in needed",
+    }
+
+
 # ---- command line ----------------------------------------------------------
 
 def build_parser():

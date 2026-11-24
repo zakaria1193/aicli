@@ -439,6 +439,10 @@ class Handler(BaseHTTPRequestHandler):
                 res = aicli.cancel_login(self.server.aicli_config, tool)
                 self._send_json(200, res)
                 return
+            elif self.path == "/v1/auth/auto-reauth":
+                res = aicli.auto_reauth(self.server.aicli_config, tool)
+                self._send_json(200 if res.get("ok") else 400, res)
+                return
 
         if self.path != "/v1/chat/completions":
             self._send_error(404, "not found")

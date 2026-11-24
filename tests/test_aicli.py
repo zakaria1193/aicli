@@ -1648,6 +1648,22 @@ class AuthCliTests(unittest.TestCase):
                 cached = json.loads(quota_path.read_text())
                 self.assertEqual(cached["agy"]["result"]["state"], "down")
 
+    def test_auto_reauth_refuses_same_tool_and_falls_back_with_url(self):
+        cfg = {
+            "claude": {"bin": str(FAKE_CLI / "fake-claude")},
+            "agy": {"bin": str(FAKE_CLI / "fake-agy")},
+            "classes": {"google-chrome-handler": {"tool": "agy", "tier": "default"}},
+        }
+        with unittest.mock.patch.object(
+            aicli, "start_login",
+            return_value={"ok": True, "auth_url": "https://accounts.google.com/o/oauth2/auth?x=1"},
+        ):
+            res = aicli.auto_reauth(cfg, "agy")
+            self.assertFalse(res["ok"])
+            self.assertFalse(res["auto_reauthed"])
+            self.assertEqual(res["auth_url"], "https://accounts.google.com/o/oauth2/auth?x=1")
+            self.assertIn("refusing auto-reauth", res["error"].lower())
+
 
 class AllowanceCliTests(unittest.TestCase):
     def test_set_and_clear_allowance_cli(self):
