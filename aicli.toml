@@ -72,6 +72,14 @@ tier = "default"
 model = "gemini-4-hydrogen-medium"
 fallback = { tool = "claude", model = "claude-sonnet-5", effort = "medium" }
 
+[classes.code-review]
+description = "Fresh-context review of a ticket's diff against its spec and plan (pjm auto-review)"
+frequency = "Once per ticket after execute, plus fix rounds"
+tool = "agy"
+tier = "default"
+model = "gemini-4-hydrogen-medium"
+fallback = { tool = "claude", model = "claude-sonnet-5", effort = "medium" }
+
 [classes.managerial-audit]
 description = "Cross-project status auditing, watchdog, and scheduled scrum reports"
 frequency = "4 times / day (07:30, 12:00, 17:00, 22:00)"

@@ -83,6 +83,7 @@ aicli run --client demo --class lightweight-task -- -p "say hi"
 | `maintenance` | background fixes, dependency bumps, CI repairs |
 | `managerial-audit` | scheduled reports, watchdogs, audits |
 | `standard-dev` | everyday code changes |
+| `code-review` | fresh-context review of a change against its spec and plan (pjm auto-review) |
 | `deep-spec` | architecture, long specs, deep reviews |
 | `brainstorm` | divergent idea generation, mind maps |
 | `conversation` | talking to a project agent, quick answers (pjm Chief of staff, Tech lead) |
