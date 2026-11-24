@@ -51,6 +51,14 @@ For callers that want text in, text out, an optional HTTP service
 Each backend is a table in `aicli.toml`: its binary, model flag, effort flag
 and three model tiers (`low`, `default`, `deep`).
 
+When adding a new backend to `aicli`, it should provide the same job-level
+abstraction across every row in [Jobs](#jobs) — in particular **interactive
+mode (`--interactive`) paired with a `Stop` / turn-completion hook** (so
+supervisors like `pjm` can run live, inspectable TUI sessions in tmux where
+the operator can intervene at any time, instead of headless-only runs),
+token-usage logging, and explicit handling (or documented no-op) for every
+other job option.
+
 ## Quick start
 
 Needs Python 3.11+ and nothing else (standard library only).
