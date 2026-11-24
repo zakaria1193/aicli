@@ -445,12 +445,13 @@ def _mkdir(p):
 
 
 def agy_skills_dir(config):
-    """agy's own skills folder: `[agy] skills_dir`, else `skills/` next to its `trust_file`
-    (the CLI's settings folder), else None."""
+    """agy's own skills folder: `[agy] skills_dir`, else the global `config/skills` folder
+    beside the CLI's settings folder (trust_file's parent's parent), else None. agy reads
+    its global skills from there, not from the CLI's settings folder."""
     agy = config.get("agy") or {}
     path = os.environ.get("AICLI_AGY_SKILLS_DIR") or agy.get("skills_dir")
     if not path and agy.get("trust_file"):
-        path = str(Path(agy["trust_file"]).expanduser().parent / "skills")
+        path = str(Path(agy["trust_file"]).expanduser().parent.parent / "config" / "skills")
     return Path(path).expanduser() if path else None
 
 
