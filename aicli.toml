@@ -26,9 +26,9 @@ effort_flag = "--effort"
 model_sets_effort = true
 # agy settings file whose `trustedWorkspaces` aicli extends so agy never asks "trust this folder".
 trust_file = "~/.gemini/antigravity-cli/settings.json"
-# agy's own skills folder, where aicli keeps the skills of agy runs (as aicli-<name>).
-# Default: skills/ next to trust_file.
-skills_dir = "~/.gemini/antigravity-cli/skills"
+# agy's global skills folder, where aicli keeps the skills of agy runs (as aicli-<name>).
+# Default: config/skills beside trust_file's folder (agy does not read antigravity-cli/skills).
+skills_dir = "~/.gemini/config/skills"
 
 [agy.tiers]
 low = "gemini-3.8-flash-low"

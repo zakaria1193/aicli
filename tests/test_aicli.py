@@ -1756,6 +1756,17 @@ class SkillsTests(unittest.TestCase):
         self.assertIn("claude-review", argv[-1])
         self.assertNotIn("shared", argv[-1])
 
+    def test_agy_skills_dir_defaults_to_the_global_config_skills(self):
+        cfg = {"agy": {"trust_file": "/h/g/antigravity-cli/settings.json"}}
+        old = os.environ.pop("AICLI_AGY_SKILLS_DIR", None)
+        try:
+            self.assertEqual(aicli.agy_skills_dir(cfg), Path("/h/g/config/skills"))
+            self.assertEqual(aicli.agy_skills_dir({"agy": {"skills_dir": "/x", **cfg["agy"]}}), Path("/x"))
+            self.assertIsNone(aicli.agy_skills_dir({"agy": {}}))
+        finally:
+            if old is not None:
+                os.environ["AICLI_AGY_SKILLS_DIR"] = old
+
     def test_caller_adds_a_skill_by_name_or_folder(self):
         own = _skill(self.d / "mine", "my-skill")
         argv, _ = self.argv("--class", "t-claude", "--skill", "claude-review", "--skill", str(own), "--prompt", "go")

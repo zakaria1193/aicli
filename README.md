@@ -485,9 +485,10 @@ the CLI the router picked (fallbacks included), plus any `--skill` the caller ad
   (content-addressed under `~/.cache/aicli/plugins/`, reused until a skill changes)
   and passes `--plugin-dir`. Only those skills are loaded, as `aicli:<name>`.
 - **agy:** agy has no per-run skills flag, so aicli keeps each skill an agy run
-  needs in agy's own skills folder as `aicli-<name>` (`[agy] skills_dir`, default
-  `skills/` next to `trust_file`; `AICLI_AGY_SKILLS_DIR`), refreshed when its content
-  changes. agy sees every skill there by its one-line description only.
+  needs in agy's global skills folder as `aicli-<name>` (`[agy] skills_dir`, default
+  `config/skills` beside `trust_file`'s folder, i.e. `~/.gemini/config/skills`;
+  `AICLI_AGY_SKILLS_DIR`), refreshed when its content changes. They are real copies:
+  agy may not follow symlinked skills. agy sees every skill there by its one-line description only.
 - With a `--prompt`, aicli adds one line naming the run's skills, so the model
   knows which ones are meant for this job.
 
