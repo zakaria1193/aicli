@@ -448,6 +448,10 @@ with no counts when it reported none), including runs that failed; requests
 rejected with a 400, 401, 404 or 413 run nothing and are not logged. A log
 that can't be written never fails a request.
 
+## Trusted folders
+
+Before launching a backend, `aicli run` marks the working directory and its git root as trusted in that backend's own state (claude: `~/.claude.json`, agy: `trustedWorkspaces` in the file `[agy] trust_file` names), so no "Do you trust this folder?" prompt can block an unattended run. Override the files with `AICLI_CLAUDE_JSON` / `AICLI_AGY_SETTINGS`. Missing files are skipped silently.
+
 ## Fair use
 
 aicli runs the official, unmodified CLIs under **your own** login, for

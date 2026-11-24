@@ -432,6 +432,59 @@ class RunTests(unittest.TestCase):
         )
 
 
+class TrustTests(unittest.TestCase):
+    """No backend may ever sit on a "trust this folder" prompt."""
+
+    def _run(self, d, tool_class, claude_json, agy_json, cwd):
+        config_path, _ = make_config(Path(d))
+        env = {**os.environ, "AICLI_CONFIG": str(config_path),
+               "AICLI_CLAUDE_JSON": str(claude_json), "AICLI_AGY_SETTINGS": str(agy_json)}
+        return subprocess.run([sys.executable, str(AICLI), "run", "--class", tool_class, "--", "-p", "x"],
+                              capture_output=True, text=True, env=env, cwd=cwd)
+
+    def test_agy_run_trusts_cwd_and_git_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d).resolve()
+            repo = d / "repo"
+            (repo / "sub").mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            agy = d / "settings.json"
+            agy.write_text('{"keep": 1}')
+            r = self._run(d, "t-agy", d / "claude.json", agy, repo / "sub")
+            self.assertEqual(r.returncode, 0, r.stderr)
+            data = json.loads(agy.read_text())
+            self.assertEqual(data["keep"], 1)
+            self.assertEqual(sorted(data["trustedWorkspaces"]), sorted([str(repo), str(repo / "sub")]))
+            self._run(d, "t-agy", d / "claude.json", agy, repo / "sub")   # idempotent
+            self.assertEqual(len(json.loads(agy.read_text())["trustedWorkspaces"]), 2)
+
+    def test_claude_run_trusts_cwd(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d).resolve()
+            cj = d / "claude.json"
+            cj.write_text('{"projects": {"/x": {"a": 1}}}')
+            work = d / "work"
+            work.mkdir()
+            cfg, _ = make_config(d)
+            routes = aicli.load_config(cfg)
+            tool = "claude"
+            env = {**os.environ, "AICLI_CONFIG": str(cfg), "AICLI_CLAUDE_JSON": str(cj)}
+            code = ("import sys; sys.path.insert(0, %r); import aicli; aicli.trust_cwd('claude')" % str(AICLI.parent))
+            subprocess.run([sys.executable, "-c", code], env=env, cwd=work, check=True)
+            data = json.loads(cj.read_text())
+            self.assertTrue(data["projects"][str(work)]["hasTrustDialogAccepted"])
+            self.assertEqual(data["projects"]["/x"], {"a": 1})
+
+    def test_missing_config_never_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.environ["AICLI_CLAUDE_JSON"] = str(Path(d) / "nope.json")
+            try:
+                self.assertFalse(aicli.trust_cwd("claude", d))
+                self.assertFalse(aicli.trust_cwd("unknown", d))
+            finally:
+                del os.environ["AICLI_CLAUDE_JSON"]
+
+
 class UsageTests(unittest.TestCase):
     def test_usage_json_matches_old_compute_shape(self):
         with tempfile.TemporaryDirectory() as d:
