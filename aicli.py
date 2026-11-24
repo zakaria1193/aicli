@@ -1192,13 +1192,9 @@ def parse_agy_usage(text):
     return out
 
 
-def _agy_env(no_browser=False):
+def _agy_env():
     env = dict(os.environ)
     env.setdefault("AGY_CLI_FORCE_FILE_TOKEN_STORAGE", "1")
-    if no_browser:
-        env["BROWSER"] = "/bin/true"
-        env.pop("DISPLAY", None)
-        env.pop("WAYLAND_DISPLAY", None)
     return env
 
 
@@ -1227,7 +1223,7 @@ def _agy_usage(config, timeout):
     try:
         result = subprocess.run(
             [bin_path, "-p", "/usage"], capture_output=True, text=True,
-            stdin=subprocess.DEVNULL, timeout=timeout, check=False, env=_agy_env(no_browser=True),
+            stdin=subprocess.DEVNULL, timeout=timeout, check=False, env=_agy_env(),
         )
     except subprocess.TimeoutExpired as exc:
         combined = _decode_stream(exc.stdout) + "\n" + _decode_stream(exc.stderr)
@@ -2024,7 +2020,7 @@ def auth_status(config, tool=None):
             try:
                 p = subprocess.run(
                     [bin_path, "-p", "/usage"], capture_output=True, text=True,
-                    stdin=subprocess.DEVNULL, timeout=12, check=False, env=_agy_env(no_browser=True),
+                    stdin=subprocess.DEVNULL, timeout=12, check=False, env=_agy_env(),
                 )
                 combined = (p.stdout or "") + "\n" + (p.stderr or "")
                 if _agy_output_needs_auth(combined):
