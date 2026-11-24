@@ -1,0 +1,77 @@
+# The skills aicli loads into runs: where each one comes from, and which classes get it.
+#
+# A skill is a folder with a SKILL.md (the open Agent Skills format, read natively by
+# claude and agy). Every skill below is fetched from its public source by
+# `aicli skills update` (run by `make install`, so on every upgrade) into
+# ~/.cache/aicli/skills; the copy committed in skills/vendor/ is the fallback when the
+# cache has none. `aicli skills update --vendor` refreshes the committed copy.
+#
+# A class lists its skills for every CLI (`all`) and per CLI (`claude`, `agy`): a run
+# loads `all` plus the list of the CLI the router picked, fallbacks included. A `skills`
+# key on the class in aicli.toml or routes.json replaces the default here.
+
+[sources.agent-skills]
+repo = "https://github.com/addyosmani/agent-skills"
+license = "MIT"
+
+[sources.gemini-cli]
+repo = "https://github.com/google-gemini/gemini-cli"
+license = "Apache-2.0"
+
+# --- skills -------------------------------------------------------------------
+
+[skills.spec-driven-development]
+source = "agent-skills"
+path = "skills/spec-driven-development"
+
+[skills.planning-and-task-breakdown]
+source = "agent-skills"
+path = "skills/planning-and-task-breakdown"
+
+[skills.incremental-implementation]
+source = "agent-skills"
+path = "skills/incremental-implementation"
+
+[skills.test-driven-development]
+source = "agent-skills"
+path = "skills/test-driven-development"
+
+[skills.debugging-and-error-recovery]
+source = "agent-skills"
+path = "skills/debugging-and-error-recovery"
+
+[skills.code-review-and-quality]
+source = "agent-skills"
+path = "skills/code-review-and-quality"
+
+[skills.ci-cd-and-automation]
+source = "agent-skills"
+path = "skills/ci-cd-and-automation"
+
+[skills.shipping-and-launch]
+source = "agent-skills"
+path = "skills/shipping-and-launch"
+
+# Google's own review skill from the Gemini CLI repo, for Gemini models.
+[skills.code-reviewer]
+source = "gemini-cli"
+path = ".gemini/skills/code-reviewer"
+
+# --- default skills per class -------------------------------------------------
+
+[classes.deep-spec]
+all = ["spec-driven-development", "planning-and-task-breakdown"]
+
+[classes.standard-dev]
+all = ["incremental-implementation", "test-driven-development", "debugging-and-error-recovery"]
+
+# The review skill made for each model family.
+[classes.code-review]
+claude = ["code-review-and-quality"]
+agy = ["code-reviewer"]
+
+[classes.maintenance]
+all = ["debugging-and-error-recovery", "ci-cd-and-automation"]
+
+[classes.deploy-engineer]
+all = ["shipping-and-launch"]

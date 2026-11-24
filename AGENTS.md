@@ -27,6 +27,7 @@ Every backend added to `aicli.toml` and `JOB_BUILDERS` must implement the same t
 
 - **Interactive mode + turn-completion (`Stop`) hooks**: wire `--interactive` (live TUI in tmux so the operator can watch and intervene at any time) together with the CLI's lifecycle / `Stop` hook (or equivalent turn-completion signal) rather than leaving the backend stuck in headless-only `-p` mode. Document any gap explicitly if the CLI truly has no hook mechanism.
 - **All `JOB_BUILDERS` options**: handle `--prompt` / `--prompt-file`, `--system-prompt-file`, `--oneshot`, `--interactive`, `--output-format`, `--session-id` / `--resume` / `--conversation`, `--settings` (hooks), `--mcp-config`, `--permission-mode`, and `--remote-control` (explicitly ignoring unsupported ones with a comment and test coverage).
+- **Skills**: load the run's skills natively in `apply_skills` (a per-run flag like claude's `--plugin-dir`, else the CLI's own skills folder like agy), with tests, so every class's skills reach it. See "Skills" in `README.md`.
 - **Folder trust**: an entry in `TRUSTERS` and a test in `TrustTests`, so its runs never stop on a "trust this folder" prompt (see above).
 - **Usage & quota**: report or estimate token counts in the usage log (above) and wire `/usage` quota probing if the backend participates in `[fallback]`.
 - Update the `Jobs` table in `README.md` and add unit tests in `tests/`.

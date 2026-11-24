@@ -220,10 +220,11 @@ def _job_agy(job, extra):
 JOB_BUILDERS = {"claude": _job_claude, "agy": _job_agy}
 
 
-def build_argv(config, tool, tier="default", effort=None, extra=None, model=None, job=None):
+def build_argv(config, tool, tier="default", effort=None, extra=None, model=None, job=None, skill_flags=None):
     """The argv `run` would exec, or None if the binary can't be found. `model`
     replaces the tier's model and any `--model` the caller passed (a fallback step).
-    `job` is the tool-neutral request (see job_from_args), built into this tool's flags."""
+    `job` is the tool-neutral request (see job_from_args), built into this tool's flags.
+    `skill_flags` (apply_skills) go right after the model and effort."""
     cfg = config[tool]
     bin_path = resolve_bin(config, tool)
     if bin_path is None:
@@ -251,6 +252,7 @@ def build_argv(config, tool, tier="default", effort=None, extra=None, model=None
     if effort and effort_flag and not _has_flag(extra, effort_flag):
         argv += [effort_flag, effort]
 
+    argv += list(skill_flags or [])
     argv += JOB_BUILDERS[tool](job, extra) if job else extra
     return argv
 
@@ -285,6 +287,322 @@ def _drop_flag(args, flag):
 
 def _strip_dashdash(args):
     return args[1:] if args[:1] == ["--"] else args
+
+
+# ---- skills ------------------------------------------------------------------
+# aicli loads Agent Skills (a folder holding a SKILL.md) into each run natively:
+# claude gets them as a per-run plugin (`--plugin-dir`), agy finds them in its own
+# skills folder. Which skills a run gets comes from its class (and the CLI the
+# router picked), plus any `--skill` the caller adds. The catalog is
+# skills/skills.toml: each skill's public source, and the default skills per class.
+# A cached copy of every skill is committed in skills/vendor/; `aicli skills update`
+# (run by `make install`, so on every upgrade) fetches the latest into the cache dir,
+# which wins over the vendored copy. A skill that can't be found never fails a run.
+
+SKILLS_ROOT = Path(__file__).resolve().parent / "skills"
+DEFAULT_SKILLS_CACHE = Path("~/.cache/aicli/skills")
+AGY_SKILL_PREFIX = "aicli-"
+SKILL_HASH_FILE = ".aicli-hash"
+SKILLS_NOTE = "Skills loaded for this job (use the ones that fit): {names}."
+
+
+def skills_catalog_path(config=None):
+    if os.environ.get("AICLI_SKILLS"):
+        return Path(os.environ["AICLI_SKILLS"])
+    if config and config.get("skills_file"):
+        return Path(config["skills_file"]).expanduser()
+    return SKILLS_ROOT / "skills.toml"
+
+
+def load_skills_catalog(config=None):
+    path = skills_catalog_path(config)
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        print(f"aicli: warning: skills catalog {path} unreadable, no skills loaded: {e}", file=sys.stderr)
+        return {}
+
+
+def skills_cache_dir():
+    return Path(os.environ.get("AICLI_SKILLS_CACHE") or DEFAULT_SKILLS_CACHE).expanduser()
+
+
+def skills_vendor_dir(catalog_path=None):
+    return Path(catalog_path or skills_catalog_path()).parent / "vendor"
+
+
+def find_skill(name, catalog_path=None):
+    """The folder holding skill `name`: the fetched copy in the cache, else the
+    vendored one next to the catalog, else None. A path to a folder with a
+    SKILL.md (a caller's own skill, `--skill ./my-skill`) is used as is."""
+    if "/" in name:
+        p = Path(name).expanduser()
+        return p.resolve() if (p / "SKILL.md").is_file() else None
+    for root in (skills_cache_dir(), skills_vendor_dir(catalog_path)):
+        if (root / name / "SKILL.md").is_file():
+            return root / name
+    return None
+
+
+def _skill_names(spec, tool):
+    """A class's `skills`: a list (every CLI) or {all = [...], claude = [...], agy = [...]}."""
+    if isinstance(spec, list):
+        return [str(s) for s in spec]
+    if isinstance(spec, dict):
+        return [str(s) for s in [*(spec.get("all") or []), *(spec.get(tool) or [])]]
+    return []
+
+
+def class_skill_names(config, workload_class, tool, routes=None, catalog=None):
+    """The skill names a run of `workload_class` on `tool` loads. A `skills` key on the
+    class (aicli.toml or routes.json, even an empty list) replaces the catalog's default."""
+    if not workload_class:
+        return []
+    cls = _class_cfg(config, workload_class, routes)
+    if "skills" in cls:
+        return _skill_names(cls["skills"], tool)
+    catalog = load_skills_catalog(config) if catalog is None else catalog
+    return _skill_names((catalog.get("classes") or {}).get(workload_class), tool)
+
+
+def resolve_skills(config, workload_class, tool, extra=(), routes=None):
+    """[(name, folder)] for this run, in order, without duplicates. Unknown skills are
+    reported on stderr and left out."""
+    catalog_path = skills_catalog_path(config)
+    names = class_skill_names(config, workload_class, tool, routes) + list(extra or [])
+    out, seen = [], set()
+    for n in names:
+        folder = find_skill(n, catalog_path)
+        if folder is None:
+            print(f"aicli: warning: skill {n!r} not found, run goes on without it", file=sys.stderr)
+            continue
+        name = folder.name
+        if name not in seen:
+            seen.add(name)
+            out.append((name, folder))
+    return out
+
+
+def tree_hash(folder):
+    """sha256 of a folder's files (relative path and bytes), aicli's own marker excluded."""
+    import hashlib
+    h = hashlib.sha256()
+    folder = Path(folder)
+    for p in sorted(folder.rglob("*")):
+        if p.is_file() and p.name != SKILL_HASH_FILE and ".git" not in p.relative_to(folder).parts:
+            h.update(str(p.relative_to(folder)).encode() + b"\0")
+            h.update(p.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def _copy_skill(src, dest):
+    """Copy a skill folder to `dest` atomically (symlinks followed, .git left out)."""
+    import shutil
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=f".{dest.name}.", dir=dest.parent))
+    shutil.rmtree(tmp)
+    shutil.copytree(src, tmp, ignore=shutil.ignore_patterns(".git"))
+    old = None
+    if dest.exists():
+        old = dest.with_name(f".{dest.name}.old.{os.getpid()}")
+        os.replace(dest, old)
+    os.replace(tmp, dest)
+    if old is not None:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def stage_claude_plugin(skills):
+    """A plugin folder holding exactly `skills`, for claude's `--plugin-dir`. It is
+    content-addressed under the cache, so a run reuses it until a skill changes."""
+    import hashlib
+    key = hashlib.sha256("\n".join(f"{n}:{tree_hash(f)}" for n, f in skills).encode()).hexdigest()[:16]
+    root = skills_cache_dir().parent / "plugins" / key
+    if (root / ".claude-plugin" / "plugin.json").is_file():
+        return root
+    build = Path(tempfile.mkdtemp(prefix=".plugin.", dir=_mkdir(root.parent)))
+    (build / ".claude-plugin").mkdir()
+    (build / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+        "name": "aicli", "version": "1.0.0",
+        "description": "Skills aicli loads for this workload class",
+    }, indent=2) + "\n")
+    import shutil
+    for name, folder in skills:
+        shutil.copytree(folder, build / "skills" / name, ignore=shutil.ignore_patterns(".git"))
+    try:
+        os.replace(build, root)
+    except OSError:  # another run staged the same set first
+        shutil.rmtree(build, ignore_errors=True)
+    return root
+
+
+def _mkdir(p):
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def agy_skills_dir(config):
+    """agy's own skills folder: `[agy] skills_dir`, else `skills/` next to its `trust_file`
+    (the CLI's settings folder), else None."""
+    agy = config.get("agy") or {}
+    path = os.environ.get("AICLI_AGY_SKILLS_DIR") or agy.get("skills_dir")
+    if not path and agy.get("trust_file"):
+        path = str(Path(agy["trust_file"]).expanduser().parent / "skills")
+    return Path(path).expanduser() if path else None
+
+
+def install_agy_skills(config, skills):
+    """agy has no per-run skills flag, so aicli keeps each skill in agy's own skills
+    folder (as aicli-<name>) and refreshes it when its content changed. agy lists every
+    skill there by its description only; the prompt names the ones this job should use."""
+    root = agy_skills_dir(config)
+    if root is None:
+        print("aicli: warning: no agy skills folder ([agy] skills_dir), agy runs without skills", file=sys.stderr)
+        return
+    for name, folder in skills:
+        dest = root / f"{AGY_SKILL_PREFIX}{name}"
+        digest = tree_hash(folder)
+        try:
+            if (dest / SKILL_HASH_FILE).read_text().strip() == digest:
+                continue
+        except OSError:
+            pass
+        try:
+            _copy_skill(folder, dest)
+            (dest / SKILL_HASH_FILE).write_text(digest + "\n")
+        except OSError as e:
+            print(f"aicli: warning: could not install skill {name} for agy: {e}", file=sys.stderr)
+
+
+def apply_skills(config, tool, job, skills):
+    """(job, extra flags) once this run's skills are in place for `tool`. The prompt, when
+    there is one, gets a line naming the skills so the model knows they are for this job."""
+    if not skills:
+        return job, []
+    flags = []
+    if tool == "claude":
+        try:
+            flags = ["--plugin-dir", str(stage_claude_plugin(skills))]
+        except OSError as e:
+            print(f"aicli: warning: could not stage skills for claude: {e}", file=sys.stderr)
+            return job, []
+    elif tool == "agy":
+        install_agy_skills(config, skills)
+    if job and job.get("prompt"):
+        names = ", ".join(n for n, _ in skills)
+        job = {**job, "prompt": f"{job['prompt']}\n\n{SKILLS_NOTE.format(names=names)}"}
+    return job, flags
+
+
+def run_skills(args, config, tool, resolved_class, routes, job):
+    """apply_skills for `argv`/`run`: the class's skills for `tool` plus --skill, unless
+    --no-skills. Returns (job, flags, names of the skills loaded)."""
+    if getattr(args, "no_skills", False):
+        return job, [], []
+    skills = resolve_skills(config, resolved_class, tool, getattr(args, "skill", None) or [], routes)
+    job, flags = apply_skills(config, tool, job, skills)
+    return job, flags, [n for n, _ in skills]
+
+
+def _git(*args, cwd=None):
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=300)
+
+
+def update_skills(catalog, dest, only=None):
+    """Fetch every catalog skill (or `only` these) from its source into `dest`, one shallow
+    sparse clone per source repo. A skill whose fetch fails keeps its current copy.
+    Returns [{name, status, commit, sha256}] and writes dest/skills.lock.json."""
+    import shutil
+    dest = _mkdir(Path(dest))
+    lock_path = dest / "skills.lock.json"
+    try:
+        lock = json.loads(lock_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        lock = {}
+    sources = catalog.get("sources") or {}
+    by_source = {}
+    for name, s in (catalog.get("skills") or {}).items():
+        if only and name not in only:
+            continue
+        by_source.setdefault(s.get("source"), []).append((name, s))
+    report = []
+    for src_name, items in by_source.items():
+        repo = (sources.get(src_name) or {}).get("repo")
+        ref = (sources.get(src_name) or {}).get("ref")
+        tmp = Path(tempfile.mkdtemp(prefix="aicli-skills-"))
+        try:
+            if not repo:
+                raise RuntimeError(f"source {src_name!r} has no repo")
+            clone = ["clone", "-q", "--depth", "1", "--filter=blob:none", "--sparse"]
+            if ref:
+                clone += ["--branch", ref]
+            p = _git(*clone, repo, str(tmp / "r"))
+            if p.returncode != 0:
+                raise RuntimeError(p.stderr.strip() or "git clone failed")
+            p = _git("sparse-checkout", "set", *[s["path"] for _, s in items], cwd=tmp / "r")
+            if p.returncode != 0:
+                raise RuntimeError(p.stderr.strip() or "git sparse-checkout failed")
+            commit = _git("rev-parse", "HEAD", cwd=tmp / "r").stdout.strip()
+            # keep the source's license next to the copies (cone mode checks out root files)
+            for lic in sorted((tmp / "r").glob("LICEN[SC]E*"))[:1]:
+                _mkdir(dest / "licenses")
+                shutil.copyfile(lic, dest / "licenses" / f"{src_name}.txt")
+            for name, s in items:
+                src = tmp / "r" / s["path"]
+                if not (src / "SKILL.md").is_file():
+                    report.append({"name": name, "status": f"failed: no SKILL.md at {s['path']}"})
+                    continue
+                digest = tree_hash(src)
+                old = (lock.get(name) or {}).get("sha256")
+                if old != digest or not (dest / name / "SKILL.md").is_file():
+                    _copy_skill(src, dest / name)
+                lock[name] = {"source": src_name, "repo": repo, "path": s["path"], "commit": commit,
+                              "sha256": digest, "license": (sources.get(src_name) or {}).get("license", "")}
+                report.append({"name": name, "status": "unchanged" if old == digest else ("new" if old is None else "updated"),
+                               "commit": commit, "sha256": digest})
+        except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+            for name, _ in items:
+                report.append({"name": name, "status": f"failed: {e}"})
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    lock_path.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n")
+    return report
+
+
+def cmd_skills(args, config):
+    catalog = load_skills_catalog(config)
+    if args.skills_command == "update":
+        dest = skills_vendor_dir(skills_catalog_path(config)) if args.vendor else skills_cache_dir()
+        report = update_skills(catalog, dest, only=set(args.only) if args.only else None)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            for r in report:
+                print(f"{r['name']}: {r['status']}" + (f" ({r['commit'][:10]})" if r.get("commit") else ""))
+            print(f"[OK] skills in {dest}")
+        # an upgrade must never fail because a skill source is unreachable
+        return 0
+    # list
+    classes = sorted({*(catalog.get("classes") or {}), *(load_routes(config).get("classes") or {})})
+    if args.workload_class:
+        classes = [args.workload_class]
+    rows = []
+    for cls in classes:
+        for tool in ([args.tool] if args.tool else TOOLS):
+            names = class_skill_names(config, cls, tool, catalog=catalog)
+            rows.append({"class": cls, "tool": tool, "skills": [
+                {"name": n, "path": str(find_skill(n, skills_catalog_path(config)) or "")} for n in names]})
+    if args.json:
+        print(json.dumps(rows, indent=2))
+    else:
+        for r in rows:
+            if r["skills"]:
+                print(f"{r['class']} ({r['tool']}): " + ", ".join(
+                    s["name"] + ("" if s["path"] else " [missing]") for s in r["skills"]))
+    return 0
 
 
 # ---- routing layer ---------------------------------------------------------
@@ -1805,6 +2123,9 @@ def build_parser():
         p.add_argument("--class", dest="workload_class", help="workload class (e.g. maintenance, standard-dev)")
         p.add_argument("--json", action="store_true")
         p.add_argument("--no-fallback", action="store_true", help="never move to a fallback step")
+        p.add_argument("--skill", action="append", metavar="NAME_OR_DIR",
+                       help="load this skill too: a catalog name or a folder holding a SKILL.md (repeatable)")
+        p.add_argument("--no-skills", action="store_true", help="load no skills, not even the class's")
         p.add_argument("args", nargs=argparse.REMAINDER)
 
     def add_job_args(p):
@@ -1913,6 +2234,17 @@ def build_parser():
     p_clr_allow = route_sub.add_parser("clear-allowance", help="clear a class's temporary allowance override")
     p_clr_allow.add_argument("--class", dest="workload_class", default="standard-dev", help="workload class (default: standard-dev)")
 
+    p_skills = sub.add_parser("skills", help="the skills each class loads, and fetching them")
+    skills_sub = p_skills.add_subparsers(dest="skills_command", required=True)
+    p_sl = skills_sub.add_parser("list", help="skills per class and CLI")
+    p_sl.add_argument("--class", dest="workload_class")
+    p_sl.add_argument("--tool", choices=TOOLS)
+    p_sl.add_argument("--json", action="store_true")
+    p_su = skills_sub.add_parser("update", help="fetch the latest of every catalog skill into the cache (never fails)")
+    p_su.add_argument("--vendor", action="store_true", help="write into the repo's skills/vendor/ instead (to commit)")
+    p_su.add_argument("--only", action="append", help="only this skill (repeatable)")
+    p_su.add_argument("--json", action="store_true")
+
     p_auth = sub.add_parser("auth", help="manage and check CLI authentication")
     auth_sub = p_auth.add_subparsers(dest="auth_command", required=True)
     p_auth_status = auth_sub.add_parser("status", help="check authentication status of CLIs")
@@ -1967,9 +2299,10 @@ def cmd_argv(args, config):
                                    workload_class=resolved_class, routes=routes, effort=effort)
     eff = fallback.get("effort") if fallback else effort
     pinned = None if fallback else route_model(routes, args.client, resolved_class)
+    job, skill_flags, skill_names = run_skills(args, config, tool, resolved_class, routes, job)
     try:
         argv = build_argv(config, tool, tier, eff, extra, model=(fallback or {}).get("model") or pinned,
-                          job=job)
+                          job=job, skill_flags=skill_flags)
     except JobError as e:
         print(f"aicli: {e}", file=sys.stderr)
         return 2
@@ -2011,6 +2344,7 @@ def cmd_resolve(args, config):
         "model": model,
         "effort": effort,
         "fallback": fallback,
+        "skills": class_skill_names(config, resolved_class, tool, routes),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     if args.quota:
@@ -2097,9 +2431,10 @@ def cmd_run(args, config):
                                    workload_class=resolved_class, routes=routes, effort=effort)
     eff = fallback.get("effort") if fallback else effort
     pinned = None if fallback else route_model(routes, args.client, resolved_class)
+    job, skill_flags, skill_names = run_skills(args, config, tool, resolved_class, routes, job)
     try:
         argv = build_argv(config, tool, tier, eff, extra, model=(fallback or {}).get("model") or pinned,
-                          job=job)
+                          job=job, skill_flags=skill_flags)
     except JobError as e:
         print(f"aicli: {e}", file=sys.stderr)
         return 2
@@ -2123,6 +2458,7 @@ def cmd_run(args, config):
             "model": model,
             "effort": effort,
             "fallback": fallback,
+            "skills": skill_names,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             **({"quota": quota_res} if quota_res is not None else {}),
         }
@@ -2596,6 +2932,7 @@ def main(argv=None):
         "which": cmd_which, "argv": cmd_argv, "run": cmd_run, "resolve": cmd_resolve,
         "usage": cmd_usage, "fallback": cmd_fallback, "check-quota": cmd_check_quota,
         "routes": cmd_routes, "routes-api": cmd_routes_api, "route": cmd_route, "auth": cmd_auth,
+        "skills": cmd_skills,
     }[args.command]
     return handler(args, config)
 

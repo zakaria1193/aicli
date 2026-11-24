@@ -1,0 +1,74 @@
+{
+  "ci-cd-and-automation": {
+    "commit": "e997ac5b9a74eab332d5e9793bb38a38c8cfdd74",
+    "license": "MIT",
+    "path": "skills/ci-cd-and-automation",
+    "repo": "https://github.com/addyosmani/agent-skills",
+    "sha256": "b223424a3ab3040dc3d051aac7c35894b957d0e48523fb60566b843ac08c4c30",
+    "source": "agent-skills"
+  },
+  "code-review-and-quality": {
+    "commit": "e997ac5b9a74eab332d5e9793bb38a38c8cfdd74",
+    "license": "MIT",
+    "path": "skills/code-review-and-quality",
+    "repo": "https://github.com/addyosmani/agent-skills",
+    "sha256": "ef9987c65675170efe05e20e29524a8648adcdd0be8fff291fee414ff91e4ee4",
+    "source": "agent-skills"
+  },
+  "code-reviewer": {
+    "commit": "03862c4164844c6cf8063b4cc48546ec1609cf2e",
+    "license": "Apache-2.0",
+    "path": ".gemini/skills/code-reviewer",
+    "repo": "https://github.com/google-gemini/gemini-cli",
+    "sha256": "a2257b814a88d6f517743fcf36b4dd0f56f72125cb966929347dcdcc4b5d3260",
+    "source": "gemini-cli"
+  },
+  "debugging-and-error-recovery": {
+    "commit": "e997ac5b9a74eab332d5e9793bb38a38c8cfdd74",
+    "license": "MIT",
+    "path": "skills/debugging-and-error-recovery",
+    "repo": "https://github.com/addyosmani/agent-skills",
+    "sha256": "6f44b1568fd5c9f838112292e0255f8314f8454b54a67e11de56bcecddbb0f2c",
+    "source": "agent-skills"
+  },
+  "incremental-implementation": {
+    "commit": "e997ac5b9a74eab332d5e9793bb38a38c8cfdd74",
+    "license": "MIT",
+    "path": "skills/incremental-implementation",
+    "repo": "https://github.com/addyosmani/agent-skills",
+    "sha256": "3b7c4af01601b570f34e042ab58c46b6f6cf6ac2597b81fac7dfbe5bb1f9efc1",
+    "source": "agent-skills"
+  },
+  "planning-and-task-breakdown": {
+    "commit": "e997ac5b9a74eab332d5e9793bb38a38c8cfdd74",
+    "license": "MIT",
+    "path": "skills/planning-and-task-breakdown",
+    "repo": "https://github.com/addyosmani/agent-skills",
+    "sha256": "ffd51120ccac6b70fa5cd431e4dd7a056fb3ff6cced74e44ffab9c972060974b",
+    "source": "agent-skills"
+  },
+  "shipping-and-launch": {
+    "commit": "e997ac5b9a74eab332d5e9793bb38a38c8cfdd74",
+    "license": "MIT",
+    "path": "skills/shipping-and-launch",
+    "repo": "https://github.com/addyosmani/agent-skills",
+    "sha256": "28ac1d7362761e1fe105a88437c0d490b7b75f5d45332accc178ecc597152701",
+    "source": "agent-skills"
+  },
+  "spec-driven-development": {
+    "commit": "e997ac5b9a74eab332d5e9793bb38a38c8cfdd74",
+    "license": "MIT",
+    "path": "skills/spec-driven-development",
+    "repo": "https://github.com/addyosmani/agent-skills",
+    "sha256": "70a5aa76559c0db17f265bfa2f65d94fe7981c44918b654fab3fbb72c3cb04f8",
+    "source": "agent-skills"
+  },
+  "test-driven-development": {
+    "commit": "e997ac5b9a74eab332d5e9793bb38a38c8cfdd74",
+    "license": "MIT",
+    "path": "skills/test-driven-development",
+    "repo": "https://github.com/addyosmani/agent-skills",
+    "sha256": "e9c5e7da4b582c2fb060d50294022911b8e76b80ecac43904befcadb3eb33e81",
+    "source": "agent-skills"
+  }
+}
