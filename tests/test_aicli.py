@@ -28,12 +28,17 @@ def setUpModule():
     os.environ["AICLI_USAGE_LOG"] = str(Path(_STATE.name) / "usage.jsonl")
     os.environ["AICLI_ROUTES"] = str(Path(_STATE.name) / "routes.json")
     os.environ["AICLI_QUOTA_CACHE"] = str(Path(_STATE.name) / "quota.json")
+    # ...and off the real skills cache and agy's own skills folder.
+    os.environ["AICLI_SKILLS_CACHE"] = str(Path(_STATE.name) / "skills")
+    os.environ["AICLI_AGY_SKILLS_DIR"] = str(Path(_STATE.name) / "agy-skills")
 
 
 def tearDownModule():
     os.environ.pop("AICLI_USAGE_LOG", None)
     os.environ.pop("AICLI_ROUTES", None)
     os.environ.pop("AICLI_QUOTA_CACHE", None)
+    os.environ.pop("AICLI_SKILLS_CACHE", None)
+    os.environ.pop("AICLI_AGY_SKILLS_DIR", None)
     _STATE.cleanup()
 
 
@@ -616,7 +621,8 @@ class RoutingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             config_path, _ = make_config(Path(d))
             routes_path = Path(d) / "routes.json"
-            env = {**os.environ, "AICLI_CONFIG": str(config_path), "AICLI_ROUTES": str(routes_path)}
+            env = {**os.environ, "AICLI_CONFIG": str(config_path), "AICLI_ROUTES": str(routes_path),
+                   "AICLI_SKILLS": str(Path(d) / "no-skills.toml")}  # routing only: no class skills
 
             # Set class route
             res = subprocess.run([sys.executable, str(AICLI), "route", "set-class", "maintenance",
@@ -1412,7 +1418,8 @@ class FallbackCliTests(unittest.TestCase):
             res = subprocess.run(
                 [sys.executable, str(AICLI), *args], capture_output=True, text=True,
                 env={**os.environ, "AICLI_CONFIG": str(config_path), "AICLI_USAGE_LOG": str(log),
-                     "AICLI_QUOTA_CACHE": str(d / "quota.json"), "FAKE_CLAUDE_USAGE": str(d / "claude.txt"), "FAKE_AGY_USAGE": str(d / "agy.txt")},
+                     "AICLI_QUOTA_CACHE": str(d / "quota.json"), "FAKE_CLAUDE_USAGE": str(d / "claude.txt"), "FAKE_AGY_USAGE": str(d / "agy.txt"),
+                     "AICLI_SKILLS": str(d / "no-skills.toml")},  # routing only: no class skills
             )
             rows = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
         self.assertEqual(res.returncode, 0, res.stderr)
@@ -1640,3 +1647,214 @@ class AllowanceCliTests(unittest.TestCase):
             self.assertEqual(r_clr.returncode, 0, r_clr.stderr)
             saved = json.loads(routes_path.read_text())
             self.assertNotIn("allowance_override", saved.get("classes", {}).get("standard-dev", {}))
+
+
+def _skill(folder, name, body="Do the thing."):
+    folder = Path(folder) / name
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name} skill\n---\n\n{body}\n")
+    return folder
+
+
+CATALOG = """
+[sources.up]
+repo = "{repo}"
+license = "MIT"
+
+[skills.shared]
+source = "up"
+path = "skills/shared"
+
+[skills.claude-review]
+source = "up"
+path = "skills/claude-review"
+
+[skills.gemini-review]
+source = "up"
+path = "skills/gemini-review"
+
+[classes.t-claude]
+all = ["shared"]
+
+[classes.t-agy]
+all = ["shared"]
+
+[classes.code-review]
+claude = ["claude-review"]
+agy = ["gemini-review"]
+"""
+
+
+class SkillsTests(unittest.TestCase):
+    """Skills a class loads, staged natively for the CLI the router picked."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.config_path, self.cfg = make_config(self.d)
+        (self.d / "cat").mkdir()
+        self.catalog = self.d / "cat" / "skills.toml"
+        self.catalog.write_text(CATALOG.format(repo="unused"))
+        for n in ("shared", "claude-review", "gemini-review"):
+            _skill(self.d / "cat" / "vendor", n)
+        self.routes = self.d / "routes.json"
+        self.env = {**os.environ, "AICLI_CONFIG": str(self.config_path), "AICLI_ROUTES": str(self.routes),
+                    "AICLI_SKILLS": str(self.catalog), "AICLI_SKILLS_CACHE": str(self.d / "cache" / "skills"),
+                    "AICLI_AGY_SKILLS_DIR": str(self.d / "agy-skills")}
+
+    def aicli(self, *args):
+        return subprocess.run([sys.executable, str(AICLI), *args], capture_output=True, text=True, env=self.env)
+
+    def argv(self, *args):
+        res = self.aicli("argv", "--json", *args)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return json.loads(res.stdout), res.stderr
+
+    def test_claude_gets_a_plugin_dir_with_the_class_skills(self):
+        argv, _ = self.argv("--class", "t-claude", "--prompt", "go")
+        self.assertEqual(argv[3], "--plugin-dir")
+        plugin = Path(argv[4])
+        self.assertTrue((plugin / ".claude-plugin" / "plugin.json").is_file())
+        self.assertEqual(sorted(p.name for p in (plugin / "skills").iterdir()), ["shared"])
+        self.assertTrue(argv[-1].startswith("go\n\nSkills loaded for this job"))
+        self.assertIn("shared", argv[-1])
+        # the same set reuses the same staged folder
+        again, _ = self.argv("--class", "t-claude", "--prompt", "go")
+        self.assertEqual(again[4], argv[4])
+
+    def test_agy_finds_the_skills_in_its_own_folder(self):
+        argv, _ = self.argv("--class", "t-agy", "--prompt", "go")
+        self.assertNotIn("--plugin-dir", argv)
+        installed = self.d / "agy-skills" / "aicli-shared"
+        self.assertTrue((installed / "SKILL.md").is_file())
+        self.assertTrue((installed / ".aicli-hash").is_file())
+        self.assertIn("Skills loaded for this job (use the ones that fit): shared.", argv[argv.index("-p") + 1])
+        # a changed skill is refreshed on the next run
+        _skill(self.d / "cat" / "vendor", "shared", body="Changed.")
+        self.argv("--class", "t-agy", "--prompt", "go")
+        self.assertIn("Changed.", (installed / "SKILL.md").read_text())
+
+    def test_each_cli_gets_its_own_review_skill(self):
+        self.routes.write_text(json.dumps({"classes": {"code-review": {"tool": "claude"}}}))
+        argv, _ = self.argv("--class", "code-review", "--prompt", "go")
+        self.assertEqual([p.name for p in (Path(argv[argv.index("--plugin-dir") + 1]) / "skills").iterdir()],
+                         ["claude-review"])
+        self.routes.write_text(json.dumps({"classes": {"code-review": {"tool": "agy"}}}))
+        argv, _ = self.argv("--class", "code-review", "--prompt", "go")
+        self.assertIn("gemini-review", argv[argv.index("-p") + 1])
+        self.assertTrue((self.d / "agy-skills" / "aicli-gemini-review" / "SKILL.md").is_file())
+        self.assertFalse((self.d / "agy-skills" / "aicli-claude-review").exists())
+
+    def test_class_skills_key_replaces_the_catalog_default(self):
+        self.routes.write_text(json.dumps({"classes": {"t-claude": {"skills": []}}}))
+        argv, _ = self.argv("--class", "t-claude", "--prompt", "go")
+        self.assertNotIn("--plugin-dir", argv)
+        self.assertEqual(argv[-1], "go")
+        self.routes.write_text(json.dumps({"classes": {"t-claude": {"skills": {"claude": ["claude-review"]}}}}))
+        argv, _ = self.argv("--class", "t-claude", "--prompt", "go")
+        self.assertIn("claude-review", argv[-1])
+        self.assertNotIn("shared", argv[-1])
+
+    def test_caller_adds_a_skill_by_name_or_folder(self):
+        own = _skill(self.d / "mine", "my-skill")
+        argv, _ = self.argv("--class", "t-claude", "--skill", "claude-review", "--skill", str(own), "--prompt", "go")
+        names = sorted(p.name for p in (Path(argv[argv.index("--plugin-dir") + 1]) / "skills").iterdir())
+        self.assertEqual(names, ["claude-review", "my-skill", "shared"])
+
+    def test_no_skills(self):
+        argv, _ = self.argv("--class", "t-claude", "--no-skills", "--prompt", "go")
+        self.assertNotIn("--plugin-dir", argv)
+        self.assertEqual(argv[-1], "go")
+
+    def test_unknown_skill_warns_and_the_run_goes_on(self):
+        argv, err = self.argv("--class", "t-claude", "--skill", "nope", "--prompt", "go")
+        self.assertIn("skill 'nope' not found", err)
+        self.assertIn("--plugin-dir", argv)
+
+    def test_no_prompt_no_note(self):
+        argv, _ = self.argv("--class", "t-claude", "--", "-p", "raw")
+        self.assertEqual(argv[-2:], ["-p", "raw"])
+        self.assertIn("--plugin-dir", argv)
+
+    def test_cache_wins_over_vendor(self):
+        _skill(self.d / "cache" / "skills", "shared", body="Fresh.")
+        argv, _ = self.argv("--class", "t-claude", "--prompt", "go")
+        staged = Path(argv[argv.index("--plugin-dir") + 1]) / "skills" / "shared" / "SKILL.md"
+        self.assertIn("Fresh.", staged.read_text())
+
+    def test_resolve_and_list_show_the_skills(self):
+        res = self.aicli("resolve", "--class", "t-agy", "--json")
+        self.assertEqual(json.loads(res.stdout)["skills"], ["shared"])
+        res = self.aicli("skills", "list", "--class", "code-review", "--json")
+        rows = {r["tool"]: [s["name"] for s in r["skills"]] for r in json.loads(res.stdout)}
+        self.assertEqual(rows, {"claude": ["claude-review"], "agy": ["gemini-review"]})
+
+    def _upstream(self, body="v1"):
+        repo = self.d / "upstream"
+        if not repo.exists():
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+            (repo / "LICENSE").write_text("MIT License\n")
+        for n in ("shared", "claude-review", "gemini-review"):
+            _skill(repo / "skills", n, body=body)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", body],
+                       cwd=repo, check=True)
+        self.catalog.write_text(CATALOG.format(repo=repo.as_uri()))
+        return repo
+
+    def test_update_fetches_into_the_cache_and_never_fails(self):
+        self._upstream("v1")
+        res = self.aicli("skills", "update", "--json")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual({r["status"] for r in json.loads(res.stdout)}, {"new"})
+        cache = self.d / "cache" / "skills"
+        self.assertIn("v1", (cache / "shared" / "SKILL.md").read_text())
+        self.assertTrue((cache / "licenses" / "up.txt").is_file())
+        lock = json.loads((cache / "skills.lock.json").read_text())
+        self.assertEqual(lock["shared"]["license"], "MIT")
+
+        res = self.aicli("skills", "update", "--json")
+        self.assertEqual({r["status"] for r in json.loads(res.stdout)}, {"unchanged"})
+
+        self._upstream("v2")
+        res = self.aicli("skills", "update", "--json", "--only", "shared")
+        self.assertEqual([(r["name"], r["status"]) for r in json.loads(res.stdout)], [("shared", "updated")])
+        self.assertIn("v2", (cache / "shared" / "SKILL.md").read_text())
+
+        # an unreachable source keeps the copies it has, and still exits 0
+        self.catalog.write_text(CATALOG.format(repo=(self.d / "gone").as_uri()))
+        res = self.aicli("skills", "update", "--json")
+        self.assertEqual(res.returncode, 0)
+        self.assertTrue(all(r["status"].startswith("failed") for r in json.loads(res.stdout)))
+        self.assertIn("v2", (cache / "shared" / "SKILL.md").read_text())
+
+    def test_update_vendor_writes_next_to_the_catalog(self):
+        self._upstream("v1")
+        res = self.aicli("skills", "update", "--vendor")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("v1", (self.d / "cat" / "vendor" / "shared" / "SKILL.md").read_text())
+
+
+class ShippedSkillsTests(unittest.TestCase):
+    """The catalog that ships: every skill a class names is in it, and vendored."""
+
+    def test_catalog_is_complete_and_vendored(self):
+        with open(ROOT / "skills" / "skills.toml", "rb") as f:
+            catalog = tomllib.load(f)
+        known = set(catalog["skills"])
+        for cls, spec in catalog["classes"].items():
+            for key, names in spec.items():
+                self.assertIn(key, ("all", *aicli.TOOLS), cls)
+                self.assertTrue(set(names) <= known, f"{cls}: {set(names) - known}")
+        lock = json.loads((ROOT / "skills" / "vendor" / "skills.lock.json").read_text())
+        for name, s in catalog["skills"].items():
+            self.assertIn(s["source"], catalog["sources"], name)
+            self.assertTrue((ROOT / "skills" / "vendor" / name / "SKILL.md").is_file(), name)
+            self.assertEqual(lock[name]["sha256"], aicli.tree_hash(ROOT / "skills" / "vendor" / name), name)
+
+    def test_review_skill_differs_per_cli(self):
+        with open(ROOT / "skills" / "skills.toml", "rb") as f:
+            spec = tomllib.load(f)["classes"]["code-review"]
+        self.assertNotEqual(spec["claude"], spec["agy"])

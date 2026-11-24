@@ -66,7 +66,7 @@ Needs Python 3.11+ and nothing else (standard library only).
 ```sh
 git clone https://github.com/zakaria1193/aicli ~/my_repos/aicli
 cd ~/my_repos/aicli
-make install    # links ~/.local/bin/aicli -> aicli.py
+make install    # links ~/.local/bin/aicli -> aicli.py, then fetches the latest skills
 make test       # unit tests against a fake CLI; never spends real quota
 
 aicli resolve --class standard-dev                 # where would this go?
@@ -161,6 +161,7 @@ whichever CLI the router picked, so a caller never knows or names the CLI.
 | `--permission-mode dontAsk\|auto\|bypass` | `--permission-mode` (`bypass` is `bypassPermissions`) | only `bypass` (`--dangerously-skip-permissions`); agy's own otherwise |
 | `--remote-control` | `--remote-control` (Remote Control on at start) | `--remote-control` (same) |
 | `--chrome` | `--chrome` (enable Claude in Chrome integration) | ignored (agy has no Claude in Chrome) |
+| `--skill NAME_OR_DIR` (repeatable) / `--no-skills` | the class's skills plus these, as a per-run plugin (`--plugin-dir`) | the same skills, kept in agy's own skills folder; see [Skills](#skills) |
 
 Pass a prompt that may start with `-` as `--prompt=-text`. Everything after `--`
 is appended verbatim and is only for a human at a terminal
@@ -217,8 +218,10 @@ chain is: Claude plan → Claude through agy → Gemini 3.8 through agy.
 | `aicli route reset-class NAME [--field F]` | Drop a class's override (one field, or all of it), back to `aicli.toml` |
 | `aicli route reset-client ID [--field F]` | Same, for a default client's override |
 | `aicli route remove-client ID` | Drop a client row that was added from the state file (not a default one) |
+| `aicli skills list [--class C] [--tool T] [--json]` | The skills each class loads, per CLI. See [Skills](#skills) |
+| `aicli skills update [--vendor] [--only NAME]` | Fetch the latest of every catalog skill (never fails) |
 
-`opts` are `--client ID`, `--class NAME` and `--no-fallback`.
+`opts` are `--client ID`, `--class NAME`, `--no-fallback`, `--skill NAME_OR_DIR` and `--no-skills`.
 
 Details worth knowing:
 
@@ -457,6 +460,41 @@ with no counts when it reported none), including runs that failed; requests
 rejected with a 400, 401, 404 or 413 run nothing and are not logged. A log
 that can't be written never fails a request.
 
+## Skills
+
+Every run loads its class's [Agent Skills](https://agentskills.io) natively, for
+the CLI the router picked (fallbacks included), plus any `--skill` the caller adds
+(a catalog name, or a folder holding a `SKILL.md`). `--no-skills` loads none.
+
+- **Catalog:** `skills/skills.toml` names each skill's public source (a GitHub repo
+  and a path in it) and the default skills per class, for every CLI (`all`) and per
+  CLI (`claude`, `agy`). `code-review`, for example, loads agent-skills'
+  `code-review-and-quality` on claude and Google's own `code-reviewer` (from the
+  Gemini CLI repo) on agy. A `skills` key on a class in `aicli.toml` or
+  `routes.json` (a list, or `{all, claude, agy}`; `[]` for none) replaces the default.
+  `aicli skills list` shows what each class loads; `resolve --json` and
+  `--meta-out` name the skills too.
+- **Copies:** `aicli skills update` fetches the latest of every skill (one shallow
+  sparse `git clone` per source repo) into `~/.cache/aicli/skills` (`AICLI_SKILLS_CACHE`),
+  with each source's license and a `skills.lock.json` (commit and sha256 per skill).
+  `make install` runs it, so every upgrade refreshes the skills; it never fails, and a
+  skill whose source can't be reached keeps its current copy. The copy committed in
+  `skills/vendor/` (refreshed with `aicli skills update --vendor`) is the fallback
+  when the cache has none, so a fresh checkout works offline.
+- **claude:** aicli builds a plugin folder holding exactly the run's skills
+  (content-addressed under `~/.cache/aicli/plugins/`, reused until a skill changes)
+  and passes `--plugin-dir`. Only those skills are loaded, as `aicli:<name>`.
+- **agy:** agy has no per-run skills flag, so aicli keeps each skill an agy run
+  needs in agy's own skills folder as `aicli-<name>` (`[agy] skills_dir`, default
+  `skills/` next to `trust_file`; `AICLI_AGY_SKILLS_DIR`), refreshed when its content
+  changes. agy sees every skill there by its one-line description only.
+- With a `--prompt`, aicli adds one line naming the run's skills, so the model
+  knows which ones are meant for this job.
+
+Skills are instructions that runs follow unattended, often with permissions
+bypassed: add only sources you trust. Fetching them is aicli's only network
+access of its own (through `git`, never to a model vendor).
+
 ## Trusted folders
 
 Before launching a backend, `aicli run` marks the working directory and its git root as trusted in that backend's own state (claude: `~/.claude.json`, agy: `trustedWorkspaces` in the file `[agy] trust_file` names), so no "Do you trust this folder?" prompt can block an unattended run. Override the files with `AICLI_CLAUDE_JSON` / `AICLI_AGY_SETTINGS`. Missing files are skipped silently.
@@ -475,6 +513,7 @@ risk.
 aicli.py       the aicli command
 server.py      the optional OpenAI-compatible HTTP service
 aicli.toml     default config: backends, tiers, workload classes
+skills/        skills.toml (skill sources, skills per class) and vendor/ (committed copies)
 .env.example   the service's settings
 tests/         unit tests and the fake CLIs they run against
 ```
