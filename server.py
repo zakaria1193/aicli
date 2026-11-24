@@ -156,6 +156,7 @@ def run_once(config, tool, tier, effort, prompt, timeout, usage_out=None):
     answer text; claude's token counts go into `usage_out["result"]`."""
     argv = build_run_argv(config, tool, tier, effort, prompt, stream=False)
     with tempfile.TemporaryDirectory(prefix="aicli-") as scratch:
+        aicli.trust_cwd(tool, scratch)
         try:
             proc = subprocess.run(
                 argv, cwd=scratch, capture_output=True, text=True, timeout=timeout,
@@ -226,6 +227,7 @@ def run_stream(config, tool, tier, effort, prompt, timeout, usage_out=None):
                     yield text
 
     with tempfile.TemporaryDirectory(prefix="aicli-") as scratch:
+        aicli.trust_cwd(tool, scratch)
         proc = subprocess.Popen(
             argv, cwd=scratch, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1,

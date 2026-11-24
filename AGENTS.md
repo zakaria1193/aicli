@@ -16,3 +16,7 @@ Recording token usage is a mandatory feature of `aicli run`, not an option. Ever
 
 - A new job option must say what it means for every tool in `JOB_BUILDERS`, ignoring it explicitly where a CLI cannot do it, and be tested for both.
 - `--tool` stays only where an operator administers the router or a login (`route set-*`, `auth`, `which`, `usage`).
+
+## Never leave a "trust this folder" prompt
+
+Before launching any backend, `aicli run` (and the HTTP service's scratch runs) calls `trust_cwd(tool)`: the cwd and its git root are marked trusted in that backend's own state (claude: `~/.claude.json`, override `AICLI_CLAUDE_JSON`; agy: `trustedWorkspaces` in the file named by `[agy] trust_file` in `aicli.toml`, override `AICLI_AGY_SETTINGS`). It never fails a run. A new backend needs an entry in `TRUSTERS` and a test in `TrustTests`.
