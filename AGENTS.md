@@ -19,7 +19,7 @@ Recording token usage is a mandatory feature of `aicli run`, not an option. Ever
 
 ## Never leave a "trust this folder" prompt
 
-Before launching any backend, `aicli run` (and the HTTP service's scratch runs) calls `trust_cwd(tool)`: the cwd and its git root are marked trusted in that backend's own state (claude: `~/.claude.json`, override `AICLI_CLAUDE_JSON`; agy: `trustedWorkspaces` in the file named by `[agy] trust_file` in `aicli.toml`, override `AICLI_AGY_SETTINGS`). It never fails a run. A new backend needs an entry in `TRUSTERS` and a test in `TrustTests`.
+Before launching any backend, `aicli run` (and the HTTP service's scratch runs) calls `trust_cwd(tool)`: the cwd and its git root are marked trusted in that backend's own state (claude: `~/.claude.json`, override `AICLI_CLAUDE_JSON`; agy: `trustedWorkspaces` in the file named by `[agy] trust_file` in `aicli.toml`, override `AICLI_AGY_SETTINGS`). It never fails a run.
 
 ## Adding a new backend / CLI
 
@@ -27,5 +27,6 @@ Every backend added to `aicli.toml` and `JOB_BUILDERS` must implement the same t
 
 - **Interactive mode + turn-completion (`Stop`) hooks**: wire `--interactive` (live TUI in tmux so the operator can watch and intervene at any time) together with the CLI's lifecycle / `Stop` hook (or equivalent turn-completion signal) rather than leaving the backend stuck in headless-only `-p` mode. Document any gap explicitly if the CLI truly has no hook mechanism.
 - **All `JOB_BUILDERS` options**: handle `--prompt` / `--prompt-file`, `--system-prompt-file`, `--oneshot`, `--interactive`, `--output-format`, `--session-id` / `--resume` / `--conversation`, `--settings` (hooks), `--mcp-config`, `--permission-mode`, and `--remote-control` (explicitly ignoring unsupported ones with a comment and test coverage).
+- **Folder trust**: an entry in `TRUSTERS` and a test in `TrustTests`, so its runs never stop on a "trust this folder" prompt (see above).
 - **Usage & quota**: report or estimate token counts in the usage log (above) and wire `/usage` quota probing if the backend participates in `[fallback]`.
 - Update the `Jobs` table in `README.md` and add unit tests in `tests/`.
