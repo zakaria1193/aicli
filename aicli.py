@@ -1192,14 +1192,50 @@ def parse_agy_usage(text):
     return out
 
 
+def _agy_env():
+    env = dict(os.environ)
+    env.setdefault("AGY_CLI_FORCE_FILE_TOKEN_STORAGE", "1")
+    return env
+
+
+def _agy_output_needs_auth(text):
+    low = (text or "").lower()
+    return (
+        "authentication required" in low
+        or "accounts.google.com/o/oauth2/auth" in low
+        or "not logged into antigravity" in low
+    )
+
+
+def _decode_stream(val):
+    if val is None:
+        return ""
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="replace")
+    return str(val)
+
+
 def _agy_usage(config, timeout):
     bin_path = resolve_bin(config, "agy")
     if bin_path is None:
         return {"state": UNKNOWN, "detail": "agy CLI not found", "bars": {}}
 
-    result = _run_usage(bin_path, timeout)
-    if result is None:
+    try:
+        result = subprocess.run(
+            [bin_path, "-p", "/usage"], capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=timeout, check=False, env=_agy_env(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        combined = _decode_stream(exc.stdout) + "\n" + _decode_stream(exc.stderr)
+        if _agy_output_needs_auth(combined):
+            return {"state": "down", "detail": "Antigravity OAuth session expired / not logged in", "bars": {}}
         return {"state": UNKNOWN, "detail": "agy -p /usage timed out", "bars": {}}
+    except OSError:
+        return {"state": UNKNOWN, "detail": "agy -p /usage timed out", "bars": {}}
+
+    combined = (result.stdout or "") + "\n" + (result.stderr or "")
+    if _agy_output_needs_auth(combined):
+        return {"state": "down", "detail": "Antigravity OAuth session expired / not logged in", "bars": {}}
     if result.returncode != 0:
         return {"state": UNKNOWN, "detail": "agy -p /usage failed", "bars": {}}
 
@@ -1315,6 +1351,18 @@ def _cached_quota(tool, result, at=95, now=None):
         except OSError:
             pass
         return {**result, **({"next_ok_at": next_ok} if next_ok else {})}
+    if result.get("state") == "down":
+        # Auth is down: never mask this with a stale cached OK reading, and
+        # overwrite the cache entry so consumers see the failure immediately.
+        cache[tool] = {"at": now_ts, "result": result}
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(f".tmp.{os.getpid()}")
+            tmp.write_text(json.dumps(cache), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass
+        return result
     if result.get("detail", "").endswith("not found"):
         return result  # no CLI to run at all: an old reading would hide that
     hit = cache.get(tool)
@@ -1970,17 +2018,29 @@ def auth_status(config, tool=None):
                 out[t] = {"authenticated": False, "detail": f"Check failed: {e}"}
         elif t == "agy":
             try:
-                hit = _read_quota_cache().get(t)
-                if hit and isinstance(hit.get("result"), dict) and hit["result"].get("state") == OK:
+                p = subprocess.run(
+                    [bin_path, "-p", "/usage"], capture_output=True, text=True,
+                    stdin=subprocess.DEVNULL, timeout=12, check=False, env=_agy_env(),
+                )
+                combined = (p.stdout or "") + "\n" + (p.stderr or "")
+                if _agy_output_needs_auth(combined):
+                    _cached_quota("agy", {"state": "down", "detail": "Antigravity OAuth session expired / not logged in", "bars": {}})
+                    out[t] = {"authenticated": False, "detail": "Antigravity OAuth session expired / not logged in"}
+                elif p.returncode == 0 and ("Limit" in p.stdout or "Quota" in p.stdout or "Gemini" in p.stdout):
                     out[t] = {"authenticated": True, "detail": "Authenticated"}
-                    continue
-                p = subprocess.run([bin_path, "-p", "/usage"], capture_output=True, text=True, timeout=12, check=False)
-                if p.returncode == 0 and ("Limit" in p.stdout or "Quota" in p.stdout or "Gemini" in p.stdout):
-                    out[t] = {"authenticated": True, "detail": "Authenticated"}
-                elif "fake" in bin_path:
+                elif "fake" in bin_path and p.returncode == 0:
                     out[t] = {"authenticated": True, "detail": "Authenticated"}
                 else:
                     out[t] = {"authenticated": False, "detail": "Not signed in or session expired"}
+            except subprocess.TimeoutExpired as exc:
+                combined = _decode_stream(exc.stdout) + "\n" + _decode_stream(exc.stderr)
+                detail = (
+                    "Antigravity OAuth session expired / not logged in"
+                    if _agy_output_needs_auth(combined)
+                    else "Timed out checking agy auth (likely not signed in)"
+                )
+                _cached_quota("agy", {"state": "down", "detail": detail, "bars": {}})
+                out[t] = {"authenticated": False, "detail": detail}
             except Exception as e:
                 out[t] = {"authenticated": False, "detail": f"Check failed: {e}"}
     return out[tool] if tool else out
@@ -2483,6 +2543,8 @@ def cmd_run(args, config):
         # An interactive session: its output is the screen, not a pipe we can
         # read, so exec the CLI as-is and log the request without counts.
         _log_run(row, None, False)
+        if tool == "agy":
+            os.execve(argv[0], argv, _agy_env())  # never returns
         os.execv(argv[0], argv)  # never returns
     return _run_captured(argv, tool, model, row)
 
@@ -2600,7 +2662,7 @@ def trust_cwd(tool, cwd=None, config=None):
 def _run_captured(argv, tool, model, row):
     """Run the CLI with its stdout passed through unchanged while a copy is
     kept, then log the token counts it reported (or an estimate)."""
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, env=_agy_env() if tool == "agy" else None)
     old = signal.signal(signal.SIGTERM, lambda signum, frame: proc.terminate())
     kept, size = [], 0
     try:
@@ -2620,6 +2682,11 @@ def _run_captured(argv, tool, model, row):
     finally:
         signal.signal(signal.SIGTERM, old)
     text = b"".join(kept).decode("utf-8", errors="replace")
+    if tool == "agy" and code != 0 and _agy_output_needs_auth(text):
+        _cached_quota(
+            "agy",
+            {"state": "down", "detail": "Antigravity OAuth session expired / not logged in", "bars": {}},
+        )
     argv_chars = sum(len(a) for a in argv[1:])
     usage, estimated = run_usage_fields(tool, model, text, argv_chars, len(text))
     _log_run(row, usage, estimated)

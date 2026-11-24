@@ -5,8 +5,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1593,6 +1595,58 @@ class AuthCliTests(unittest.TestCase):
         res_sub = aicli.submit_code(cfg, "claude", "valid-code")
         self.assertTrue(res_sub.get("ok"))
         self.assertIn("authenticated", res_sub.get("message", ""))
+
+    def test_agy_auth_status_does_not_trust_stale_ok_quota_cache(self):
+        with tempfile.TemporaryDirectory() as d:
+            dp = Path(d)
+            quota_path = dp / "quota.json"
+            quota_path.write_text(json.dumps({
+                "agy": {
+                    "at": time.time(),
+                    "result": {"state": "ok", "bars": {"five_hour": {"pct": 10, "reset": "2099-01-01T00:00:00Z"}}},
+                }
+            }))
+            unauth_bin = dp / "agy-unauth"
+            unauth_bin.write_text(
+                "#!/bin/sh\n"
+                "echo 'Authentication required. Please visit the URL to log in:'\n"
+                "echo '  https://accounts.google.com/o/oauth2/auth?access_type=offline'\n"
+                "exit 1\n"
+            )
+            unauth_bin.chmod(0o755)
+            cfg = {"agy": {"bin": str(unauth_bin)}, "claude": {"bin": str(FAKE_CLI / "fake-claude")}}
+            with unittest.mock.patch.dict(os.environ, {"AICLI_QUOTA_CACHE": str(quota_path)}):
+                st = aicli.auth_status(cfg, "agy")
+                self.assertFalse(st["authenticated"])
+                self.assertIn("not logged in", st["detail"].lower())
+                cached = json.loads(quota_path.read_text())
+                self.assertEqual(cached["agy"]["result"]["state"], "down")
+
+    def test_agy_usage_auth_failure_invalidates_cached_ok(self):
+        with tempfile.TemporaryDirectory() as d:
+            dp = Path(d)
+            quota_path = dp / "quota.json"
+            quota_path.write_text(json.dumps({
+                "agy": {
+                    "at": time.time(),
+                    "result": {"state": "ok", "bars": {"five_hour": {"pct": 10, "reset": "2099-01-01T00:00:00Z"}}},
+                }
+            }))
+            unauth_bin = dp / "agy-unauth"
+            unauth_bin.write_text(
+                "#!/bin/sh\n"
+                "echo 'Authentication required. Please visit the URL to log in:'\n"
+                "exit 1\n"
+            )
+            unauth_bin.chmod(0o755)
+            cfg = {"agy": {"bin": str(unauth_bin)}}
+            with unittest.mock.patch.dict(os.environ, {"AICLI_QUOTA_CACHE": str(quota_path)}):
+                res = aicli._agy_usage(cfg, timeout=5)
+                self.assertEqual(res["state"], "down")
+                out = aicli._cached_quota("agy", res)
+                self.assertEqual(out["state"], "down")
+                cached = json.loads(quota_path.read_text())
+                self.assertEqual(cached["agy"]["result"]["state"], "down")
 
 
 class AllowanceCliTests(unittest.TestCase):
