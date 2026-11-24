@@ -5,16 +5,17 @@
 PYTHON ?= python3
 LINK ?= $(HOME)/.local/bin/aicli
 
-.PHONY: help install uninstall test check-quota skills-update
+.PHONY: help install uninstall test test-auth-smoke check-quota skills-update
 
 help:
 	@echo "aicli"
 	@echo "====="
-	@echo "  make install      - Link $(LINK) -> aicli.py, then fetch the latest skills"
-	@echo "  make skills-update - Fetch the latest of every skill in skills/skills.toml (never fails)"
-	@echo "  make uninstall    - Remove that link"
-	@echo "  make test         - Run the unit tests (fake CLI only, no real quota)"
-	@echo "  make check-quota  - Verify /usage quota & reset parsing against fixtures and live CLIs"
+	@echo "  make install          - Link $(LINK) -> aicli.py, then fetch the latest skills"
+	@echo "  make skills-update    - Fetch the latest of every skill in skills/skills.toml (never fails)"
+	@echo "  make uninstall        - Remove that link"
+	@echo "  make test             - Run the unit tests (fake CLI only, no real quota)"
+	@echo "  make test-auth-smoke  - Smoke-test real claude & agy auth/OAuth parsing in an isolated HOME"
+	@echo "  make check-quota      - Verify /usage quota & reset parsing against fixtures and live CLIs"
 
 install:
 	@$(PYTHON) -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
@@ -35,7 +36,10 @@ uninstall:
 	@echo "[OK] removed $(LINK)"
 
 test:
-	@$(PYTHON) -m unittest discover -s tests -v
+	@$(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
+
+test-auth-smoke:
+	@$(PYTHON) tests/auth_smoke_test.py -v
 
 check-quota:
 	@$(PYTHON) aicli.py check-quota

@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -1987,76 +1988,201 @@ def usage_log_path():
 
 _URL_RE = re.compile(r"https://claude\.com/cai/oauth/authorize\?[^\s]+")
 _ANSI_STRIP = re.compile(r"\x1b\][^\x07\x1b]*[\x07\x1b]|\x1b\[[0-9;]*[a-zA-Z]|\x07")
-_login_lock = threading.Lock()
+_AGY_URL_RE = re.compile(r"https://accounts\.google\.com/\S+")
+_URL_CONT_LINE_RE = re.compile(r"^[ \t]*([A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+)[ \t]*$")
+_OSC_HYPERLINK_RE = re.compile(r"\x1b\]8;[^\x1b]*\x1b\\")
+AGY_REAUTH_SESSION = os.environ.get("AICLI_AGY_REAUTH_SESSION", "cockpit-agy-reauth")
+_login_lock = threading.RLock()
 _current_logins = {}
 
 
-def auth_status(config, tool=None):
-    """Check authentication status for CLIs via their native CLI commands.
-    Returns dict of {tool: {authenticated: bool, detail: str, ...}}."""
-    tools = [tool] if tool else TOOLS
-    out = {}
-    for t in tools:
-        bin_path = resolve_bin(config, t)
-        if not bin_path:
-            out[t] = {"authenticated": False, "detail": f"{t} CLI not found"}
+def extract_agy_login_url(pane_text):
+    """Extract the full Google OAuth URL from a tmux pane, joining hard-wrapped lines."""
+    if not pane_text:
+        return None
+    clean = _OSC_HYPERLINK_RE.sub("", pane_text)
+    clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", clean)
+    lines = clean.splitlines()
+    for idx, line in enumerate(lines):
+        match = _AGY_URL_RE.search(line)
+        if not match:
             continue
-        if t == "claude":
+        url = match.group(0)
+        if line[match.end():].strip() == "" and len(line.rstrip()) >= 60:
+            prev_len = len(line.rstrip())
+            for nxt in lines[idx + 1:]:
+                if prev_len < 60 or not nxt.strip():
+                    break
+                cont = _URL_CONT_LINE_RE.match(nxt)
+                if not cont or cont.group(1).endswith("..."):
+                    break
+                url += cont.group(1)
+                prev_len = len(nxt.rstrip())
+        return url.rstrip(".,;:)>]}\"'")
+    return None
+
+
+def _capture_tmux(session):
+    try:
+        res = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-J", "-t", session],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        return res.stdout if res.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _auth_status_one(config, t):
+    bin_path = resolve_bin(config, t)
+    if not bin_path:
+        return {"authenticated": False, "detail": f"{t} CLI not found"}
+    if t == "claude":
+        try:
+            p = subprocess.run([bin_path, "auth", "status"], capture_output=True, text=True, timeout=5, check=False)
+            data = {}
             try:
-                p = subprocess.run([bin_path, "auth", "status"], capture_output=True, text=True, timeout=5, check=False)
-                data = {}
-                try:
-                    data = json.loads(p.stdout)
-                except Exception:
-                    pass
-                if isinstance(data, dict) and data.get("loggedIn") is True:
-                    method = data.get("authMethod", "oauth")
-                    out[t] = {"authenticated": True, "auth_method": method, "detail": f"Authenticated ({method})"}
-                else:
-                    out[t] = {"authenticated": False, "detail": "OAuth session expired / not logged in"}
-            except Exception as e:
-                out[t] = {"authenticated": False, "detail": f"Check failed: {e}"}
-        elif t == "agy":
-            try:
-                p = subprocess.run(
-                    [bin_path, "-p", "/usage"], capture_output=True, text=True,
-                    stdin=subprocess.DEVNULL, timeout=12, check=False, env=_agy_env(),
-                )
-                combined = (p.stdout or "") + "\n" + (p.stderr or "")
-                if _agy_output_needs_auth(combined):
-                    _cached_quota("agy", {"state": "down", "detail": "Antigravity OAuth session expired / not logged in", "bars": {}})
-                    out[t] = {"authenticated": False, "detail": "Antigravity OAuth session expired / not logged in"}
-                elif p.returncode == 0 and ("Limit" in p.stdout or "Quota" in p.stdout or "Gemini" in p.stdout):
-                    out[t] = {"authenticated": True, "detail": "Authenticated"}
-                elif "fake" in bin_path and p.returncode == 0:
-                    out[t] = {"authenticated": True, "detail": "Authenticated"}
-                else:
-                    out[t] = {"authenticated": False, "detail": "Not signed in or session expired"}
-            except subprocess.TimeoutExpired as exc:
-                combined = _decode_stream(exc.stdout) + "\n" + _decode_stream(exc.stderr)
-                detail = (
-                    "Antigravity OAuth session expired / not logged in"
-                    if _agy_output_needs_auth(combined)
-                    else "Timed out checking agy auth (likely not signed in)"
-                )
-                _cached_quota("agy", {"state": "down", "detail": detail, "bars": {}})
-                out[t] = {"authenticated": False, "detail": detail}
-            except Exception as e:
-                out[t] = {"authenticated": False, "detail": f"Check failed: {e}"}
-    return out[tool] if tool else out
+                data = json.loads(p.stdout)
+            except Exception:
+                pass
+            if isinstance(data, dict) and data.get("loggedIn") is True:
+                method = data.get("authMethod", "oauth")
+                return {"authenticated": True, "auth_method": method, "detail": f"Authenticated ({method})"}
+            return {"authenticated": False, "detail": "OAuth session expired / not logged in"}
+        except Exception as e:
+            return {"authenticated": False, "detail": f"Check failed: {e}"}
+    if t == "agy":
+        try:
+            p = subprocess.run(
+                [bin_path, "-p", "/usage"], capture_output=True, text=True,
+                stdin=subprocess.DEVNULL, timeout=12, check=False, env=_agy_env(),
+            )
+            combined = (p.stdout or "") + "\n" + (p.stderr or "")
+            if _agy_output_needs_auth(combined):
+                _cached_quota("agy", {"state": "down", "detail": "Antigravity OAuth session expired / not logged in", "bars": {}})
+                return {"authenticated": False, "detail": "Antigravity OAuth session expired / not logged in"}
+            if p.returncode == 0 and ("Limit" in p.stdout or "Quota" in p.stdout or "Gemini" in p.stdout):
+                return {"authenticated": True, "detail": "Authenticated"}
+            if "fake" in bin_path and p.returncode == 0:
+                return {"authenticated": True, "detail": "Authenticated"}
+            return {"authenticated": False, "detail": "Not signed in or session expired"}
+        except subprocess.TimeoutExpired as exc:
+            combined = _decode_stream(exc.stdout) + "\n" + _decode_stream(exc.stderr)
+            detail = (
+                "Antigravity OAuth session expired / not logged in"
+                if _agy_output_needs_auth(combined)
+                else "Timed out checking agy auth (likely not signed in)"
+            )
+            _cached_quota("agy", {"state": "down", "detail": detail, "bars": {}})
+            return {"authenticated": False, "detail": detail}
+        except Exception as e:
+            return {"authenticated": False, "detail": f"Check failed: {e}"}
+    return {"authenticated": False, "detail": f"Unknown tool: {t}"}
+
+
+def auth_status(config, tool=None):
+    """Check authentication status for CLIs in parallel via their native CLI commands.
+    Returns dict of {tool: {authenticated: bool, detail: str, ...}}."""
+    if tool:
+        return _auth_status_one(config, tool)
+    with ThreadPoolExecutor(max_workers=len(TOOLS)) as pool:
+        results = list(pool.map(lambda t: (t, _auth_status_one(config, t)), TOOLS))
+    return dict(results)
+
+
+def reauth_waiting(tool=None):
+    """Return list of tools currently waiting for a pasted OAuth authorization code
+    (or bool when `tool` is specified)."""
+    waiting = []
+    if tool in (None, "claude"):
+        with _login_lock:
+            cur = _current_logins.get("claude")
+            if cur and cur["proc"].poll() is None and (time.time() - cur["started"] < 600):
+                waiting.append("claude")
+    if tool in (None, "agy") and shutil.which("tmux"):
+        pane = _capture_tmux(AGY_REAUTH_SESSION)
+        if pane and ("paste the authorization code" in pane.lower() or "authorization code" in pane.lower()):
+            waiting.append("agy")
+    return bool(waiting) if tool else waiting
+
+
+def _start_agy_login(config):
+    """Start a fresh tmux session running `agy` and return its Google OAuth URL."""
+    if not shutil.which("tmux"):
+        return {"ok": False, "error": "tmux is not installed on the host."}
+    bin_path = resolve_bin(config, "agy") or "agy"
+    subprocess.run(["tmux", "kill-session", "-t", AGY_REAUTH_SESSION],
+                   capture_output=True, timeout=5, check=False)
+    subprocess.run(["tmux", "set-environment", "-g", "AGY_CLI_FORCE_FILE_TOKEN_STORAGE", "1"],
+                   capture_output=True, timeout=5, check=False)
+    subprocess.run(
+        ["tmux", "new-session", "-d", "-s", AGY_REAUTH_SESSION, "-x", "220", "-y", "60",
+         "-e", "AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1",
+         os.environ.get("SHELL", "/bin/sh"), "-l"],
+        capture_output=True, timeout=10, check=False,
+    )
+    time.sleep(0.3)
+    subprocess.run(
+        ["tmux", "send-keys", "-t", AGY_REAUTH_SESSION,
+         f"AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1 {shlex.quote(bin_path)}", "C-m"],
+        capture_output=True, timeout=5, check=False,
+    )
+    sent_enter = False
+    deadline = time.monotonic() + 12.0
+    auth_url = None
+    while time.monotonic() < deadline:
+        pane = _capture_tmux(AGY_REAUTH_SESSION)
+        auth_url = extract_agy_login_url(pane)
+        if auth_url:
+            break
+        if not sent_enter and ("Select login method" in pane or "Google OAuth" in pane):
+            subprocess.run(["tmux", "send-keys", "-t", AGY_REAUTH_SESSION, "Enter"],
+                           capture_output=True, timeout=5, check=False)
+            sent_enter = True
+        time.sleep(0.5)
+    return {
+        "ok": True,
+        "session": AGY_REAUTH_SESSION,
+        "auth_url": auth_url,
+    }
+
+
+def _submit_agy_code(config, code_clean):
+    if not shutil.which("tmux"):
+        return {"ok": False, "error": "tmux is not installed on the host."}
+    has = subprocess.run(["tmux", "has-session", "-t", AGY_REAUTH_SESSION],
+                         capture_output=True, timeout=5, check=False)
+    if has.returncode != 0:
+        fresh = _start_agy_login(config)
+        return {
+            "ok": False,
+            "error": f"Previous agy login session had closed.",
+            **({"auth_url": fresh["auth_url"]} if fresh.get("auth_url") else {}),
+        }
+    subprocess.run(["tmux", "send-keys", "-t", AGY_REAUTH_SESSION, "-l", code_clean],
+                   capture_output=True, timeout=5, check=False)
+    subprocess.run(["tmux", "send-keys", "-t", AGY_REAUTH_SESSION, "Enter"],
+                   capture_output=True, timeout=5, check=False)
+    deadline = time.monotonic() + 12.0
+    while time.monotonic() < deadline:
+        time.sleep(2.0)
+        st = auth_status(config, "agy")
+        if st.get("authenticated"):
+            return {"ok": True, "message": "agy successfully authenticated!"}
+    fresh = _start_agy_login(config)
+    return {
+        "ok": False,
+        "error": "That code wasn't accepted (the link may have expired).",
+        **({"auth_url": fresh["auth_url"]} if fresh.get("auth_url") else {}),
+    }
 
 
 def start_login(config, tool):
-    """Initiates login flow for `tool`. For claude, returns {'ok': True, 'auth_url': '...'};
-    for agy, returns instructions and interactive command."""
+    """Initiates login flow for `tool` (`claude` or `agy`), returning {'ok': True, 'auth_url': '...'}."""
+    if tool == "agy":
+        return _start_agy_login(config)
     if tool != "claude":
-        bin_path = resolve_bin(config, tool) or tool
-        return {
-            "ok": True,
-            "interactive": True,
-            "message": f"{tool} requires an interactive terminal for login",
-            "command": f"{bin_path} --no-tmux",
-        }
+        return {"ok": False, "error": f"Unknown tool: {tool}"}
 
     global _current_logins
     with _login_lock:
@@ -2119,16 +2245,23 @@ def start_login(config, tool):
 
 
 def submit_code(config, tool, code):
-    """Submits authorization code to the pending login process for `tool`."""
+    """Submits authorization code to the pending login process for `tool`.
+    On failure, automatically starts a fresh login and includes `auth_url` when available."""
+    code_clean = (code or "").strip().strip("`").strip()
+    if code_clean.startswith("<") and code_clean.endswith(">"):
+        code_clean = code_clean[1:-1].strip()
+    if not code_clean:
+        return {"ok": False, "error": "Authorization code cannot be empty"}
+
+    if tool == "agy":
+        return _submit_agy_code(config, code_clean)
+
     global _current_logins
     with _login_lock:
         cur = _current_logins.get(tool)
         if not cur or cur["proc"].poll() is not None:
+            fresh_url = None
             return {"ok": False, "error": f"No active {tool} login session in progress. Please restart login."}
-
-        code_clean = (code or "").strip()
-        if not code_clean:
-            return {"ok": False, "error": "Authorization code cannot be empty"}
 
         proc = cur["proc"]
         try:
@@ -2145,18 +2278,33 @@ def submit_code(config, tool, code):
             except Exception:
                 pass
             _current_logins.pop(tool, None)
-            return {"ok": False, "error": f"{tool} login timed out verifying code"}
+            fresh = start_login(config, tool)
+            return {
+                "ok": False,
+                "error": f"{tool} login timed out verifying code",
+                **({"auth_url": fresh["auth_url"]} if fresh.get("auth_url") else {}),
+            }
 
         _current_logins.pop(tool, None)
         st = auth_status(config, tool)
         if st.get("authenticated"):
             return {"ok": True, "message": f"{tool} successfully authenticated!"}
         err_tail = (stderr or stdout or "Code rejected").strip()[-200:]
-        return {"ok": False, "error": f"{tool} authentication failed: {err_tail}"}
+    fresh = start_login(config, tool)
+    return {
+        "ok": False,
+        "error": f"{tool} authentication failed: {err_tail}",
+        **({"auth_url": fresh["auth_url"]} if fresh.get("auth_url") else {}),
+    }
 
 
 def cancel_login(config, tool):
     """Cancels pending login for `tool`."""
+    if tool == "agy":
+        if shutil.which("tmux"):
+            subprocess.run(["tmux", "kill-session", "-t", AGY_REAUTH_SESSION],
+                           capture_output=True, timeout=5, check=False)
+        return {"ok": True}
     global _current_logins
     with _login_lock:
         cur = _current_logins.pop(tool, None)

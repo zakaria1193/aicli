@@ -395,6 +395,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/v1/auth/status":
             self._send_json(200, aicli.auth_status(self.server.aicli_config))
             return
+        if self.path == "/v1/auth/waiting":
+            self._send_json(200, {"waiting": aicli.reauth_waiting()})
+            return
         if self.path == "/v1/models":
             if not self._authorized():
                 self._send_error(401, "missing or wrong API key", code="authentication_error")
