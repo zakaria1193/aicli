@@ -1196,9 +1196,13 @@ def parse_agy_usage(text):
 
 
 def _agy_env():
-    env = dict(os.environ)
-    env.setdefault("AGY_CLI_FORCE_FILE_TOKEN_STORAGE", "1")
-    return env
+    # Not forcing AGY_CLI_FORCE_FILE_TOKEN_STORAGE: agy's own chained auth already
+    # falls back to file storage when no D-Bus session bus is present (headless
+    # boot), and keyring storage serializes writes through one daemon instead of
+    # every concurrent agy process racing to write the same file directly - the
+    # file-based period (2026-11-24 to 2026-11-25) traded that away and caused
+    # repeated real deauths under concurrent use.
+    return dict(os.environ)
 
 
 def _agy_output_needs_auth(text):
@@ -1268,9 +1272,11 @@ def _agy_file_lock_release(fd):
 def _agy_probe_lock():
     """Serializes agy status/usage *probes* across processes - not real agy
     task runs - so pjm's health check, the cockpit's polling and an `aicli
-    usage` call don't all read/refresh the one shared file-based OAuth token
-    (AGY_CLI_FORCE_FILE_TOKEN_STORAGE) at the same instant. That race is what
-    made a transient probe blip look like a real logout."""
+    usage` call don't all read/refresh the shared OAuth token at the same
+    instant. Keyring storage (the default; see _agy_env()) already
+    serializes this through its one daemon, but a headless boot window with
+    no D-Bus session bus falls back to the unlocked shared token file, and
+    that race is what made a transient probe blip look like a real logout."""
     fd = _agy_file_lock_acquire(_AGY_PROBE_LOCK_TIMEOUT)
     try:
         yield
@@ -1299,12 +1305,14 @@ def _agy_probe_usage(bin_path, timeout):
 def _agy_probe_usage_confirmed(bin_path, timeout):
     """`_agy_probe_usage`, but a reading that looks like an expired login is
     confirmed with one retry after a short settle first. Concurrent agy
-    calls (several tickets/clients at once) race on the shared file-based
-    token store (AGY_CLI_FORCE_FILE_TOKEN_STORAGE), so one of them can
-    transiently look unauthenticated for a few seconds even though the real
-    session is fine. Only a signal that survives the retry is treated as a
-    real outage - that is what gets cached and alerted on for every other
-    agy caller, so a one-off race must not be mistaken for a logout.
+    calls (several tickets/clients at once) can still race on the shared
+    token store during a headless-boot window with no D-Bus session bus
+    (keyring storage is serialized through its own daemon the rest of the
+    time; see _agy_env()), so one of them can transiently look
+    unauthenticated for a few seconds even though the real session is fine.
+    Only a signal that survives the retry is treated as a real outage -
+    that is what gets cached and alerted on for every other agy caller, so
+    a one-off race must not be mistaken for a logout.
 
     The retry's own timeout is capped (_AGY_CONFIRM_RETRY_TIMEOUT) regardless
     of `timeout`: it only has to confirm a reading already in hand, not be as
@@ -2193,18 +2201,18 @@ def _start_agy_login(config):
     bin_path = resolve_bin(config, "agy") or "agy"
     subprocess.run(["tmux", "kill-session", "-t", AGY_REAUTH_SESSION],
                    capture_output=True, timeout=5, check=False)
-    subprocess.run(["tmux", "set-environment", "-g", "AGY_CLI_FORCE_FILE_TOKEN_STORAGE", "1"],
-                   capture_output=True, timeout=5, check=False)
+    # Not forcing AGY_CLI_FORCE_FILE_TOKEN_STORAGE here any more: the fresh token this
+    # login produces must land wherever _agy_env() (and the auth_status() check right
+    # after submitting the code) expects to find it - keyring by default now. Forcing
+    # file storage just for this session would split the result from everything else.
     subprocess.run(
         ["tmux", "new-session", "-d", "-s", AGY_REAUTH_SESSION, "-x", "220", "-y", "60",
-         "-e", "AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1",
          os.environ.get("SHELL", "/bin/sh"), "-l"],
         capture_output=True, timeout=10, check=False,
     )
     time.sleep(0.3)
     subprocess.run(
-        ["tmux", "send-keys", "-t", AGY_REAUTH_SESSION,
-         f"AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1 {shlex.quote(bin_path)}", "C-m"],
+        ["tmux", "send-keys", "-t", AGY_REAUTH_SESSION, shlex.quote(bin_path), "C-m"],
         capture_output=True, timeout=5, check=False,
     )
     sent_enter = False
@@ -3022,10 +3030,12 @@ def _run_captured(argv, tool, model, row):
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, env=_agy_env() if tool == "agy" else None)
     if launch_lock_fd is not None:
         # Stagger concurrent agy launches by a few seconds - not the whole run -
-        # so two processes don't both hit the shared file-based OAuth token
-        # (AGY_CLI_FORCE_FILE_TOKEN_STORAGE) during their own startup auth
-        # check/refresh at the same instant. Released on a timer, independent
-        # of how long this run itself takes.
+        # so two processes don't both hit the shared OAuth token during their
+        # own startup auth check/refresh at the same instant. Keyring storage
+        # (the default; see _agy_env()) serializes this through its own
+        # daemon the rest of the time, but a headless-boot window with no
+        # D-Bus session bus falls back to the unlocked shared token file.
+        # Released on a timer, independent of how long this run itself takes.
         settle = float(os.environ.get("AICLI_AGY_LAUNCH_SETTLE", _AGY_LAUNCH_SETTLE))
         timer = threading.Timer(settle, _agy_file_lock_release, args=(launch_lock_fd,))
         timer.daemon = True   # never block this process's own exit on the release
