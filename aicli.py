@@ -1218,8 +1218,9 @@ def _decode_stream(val):
     return str(val)
 
 
-_AGY_AUTH_RETRY_DELAY = 2.0
-_AGY_PROBE_LOCK_TIMEOUT = 5.0   # best-effort only: never add much to a caller's own timeout
+_AGY_AUTH_RETRY_DELAY = 1.5
+_AGY_PROBE_LOCK_TIMEOUT = 2.0   # best-effort only: never add much to a caller's own timeout
+_AGY_CONFIRM_RETRY_TIMEOUT = 6.0   # capped: the retry only has to confirm, not be as patient
 _AGY_LAUNCH_LOCK_TIMEOUT = 5.0
 _AGY_LAUNCH_SETTLE = 4.0        # held after a real agy task starts, not for its whole run
 DEFAULT_AGY_PROBE_LOCK = DEFAULT_USAGE_LOG.with_name("agy-probe.lock")
@@ -1303,11 +1304,18 @@ def _agy_probe_usage_confirmed(bin_path, timeout):
     transiently look unauthenticated for a few seconds even though the real
     session is fine. Only a signal that survives the retry is treated as a
     real outage - that is what gets cached and alerted on for every other
-    agy caller, so a one-off race must not be mistaken for a logout."""
+    agy caller, so a one-off race must not be mistaken for a logout.
+
+    The retry's own timeout is capped (_AGY_CONFIRM_RETRY_TIMEOUT) regardless
+    of `timeout`: it only has to confirm a reading already in hand, not be as
+    patient as the first attempt. Pjm's own health check calls `aicli auth
+    status --json` with a 30s external timeout - an uncapped retry here
+    could make the whole round trip exceed that, turning a real "down" into
+    a silent "unknown" on pjm's side and never alerting anyone."""
     stdout, combined, rc, timed_out = _agy_probe_usage(bin_path, timeout)
     if _agy_output_needs_auth(combined):
         time.sleep(_AGY_AUTH_RETRY_DELAY)
-        stdout, combined, rc, timed_out = _agy_probe_usage(bin_path, timeout)
+        stdout, combined, rc, timed_out = _agy_probe_usage(bin_path, min(timeout, _AGY_CONFIRM_RETRY_TIMEOUT))
     return stdout, combined, rc, timed_out
 
 

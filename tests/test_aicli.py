@@ -1679,6 +1679,25 @@ class AuthCliTests(unittest.TestCase):
             self.assertEqual(calls_path.read_text().strip(), "2")   # one retry, not more
             self.assertEqual(res["state"], "ok")
 
+    def test_agy_probe_usage_confirmed_caps_the_retrys_own_timeout(self):
+        """A 30s primary timeout (pjm's own `aicli auth status --json`
+        external budget) must not also apply to the confirm retry, or two
+        uncapped attempts can together exceed pjm's timeout and a real
+        outage goes undetected on pjm's side (silently, as "unknown" rather
+        than "down") - exactly what happened 2026-11-25 ~18:00."""
+        calls = []
+
+        def fake_probe(bin_path, timeout):
+            calls.append(timeout)
+            if len(calls) == 1:
+                return "", "Authentication required", None, False
+            return "ok", "ok", 0, False
+
+        with unittest.mock.patch.object(aicli, "_agy_probe_usage", side_effect=fake_probe), \
+             unittest.mock.patch.object(aicli.time, "sleep"):
+            aicli._agy_probe_usage_confirmed("agy", 30)
+        self.assertEqual(calls, [30, aicli._AGY_CONFIRM_RETRY_TIMEOUT])
+
     def test_agy_probe_lock_serializes_concurrent_usage_probes(self):
         """pjm's health check, the cockpit's poll and an `aicli usage` call must
         not read/refresh agy's one shared file-based OAuth token at the same
