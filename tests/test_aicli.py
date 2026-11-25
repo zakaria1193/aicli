@@ -1664,6 +1664,47 @@ class AuthCliTests(unittest.TestCase):
             self.assertEqual(res["auth_url"], "https://accounts.google.com/o/oauth2/auth?x=1")
             self.assertIn("refusing auto-reauth", res["error"].lower())
 
+    def test_auto_reauth_refuses_without_reauth_account_configured(self):
+        """No [agy] reauth_account means auto-reauth can't tell Chrome which Google account
+        to click through at the account chooser, so it must refuse rather than pick one."""
+        cfg = {"classes": {"google-chrome-handler": {"tool": "claude", "tier": "default"}}}
+        with unittest.mock.patch.object(
+            aicli, "start_login",
+            return_value={"ok": True, "auth_url": "https://accounts.google.com/o/oauth2/auth?x=1"},
+        ), unittest.mock.patch.object(aicli, "resolve_route", return_value=("claude", "default", None)), \
+           unittest.mock.patch.object(aicli, "auth_status", return_value={"authenticated": True}):
+            res = aicli.auto_reauth(cfg, "agy")
+        self.assertFalse(res["ok"])
+        self.assertFalse(res["auto_reauthed"])
+        self.assertEqual(res["auth_url"], "https://accounts.google.com/o/oauth2/auth?x=1")
+        self.assertIn("reauth_account", res["error"])
+
+    def test_auto_reauth_prompt_pins_the_configured_account(self):
+        """The Claude-in-Chrome prompt must name the one account to use and forbid picking
+        any other one at Google's account chooser."""
+        cfg = {
+            "agy": {"reauth_account": "zakaria1193@gmail.com"},
+            "classes": {"google-chrome-handler": {"tool": "claude", "tier": "default"}},
+        }
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, stdout="AUTH_DONE\n", stderr="")
+
+        with unittest.mock.patch.object(
+            aicli, "start_login",
+            return_value={"ok": True, "auth_url": "https://accounts.google.com/o/oauth2/auth?x=1"},
+        ), unittest.mock.patch.object(aicli, "resolve_route", return_value=("claude", "default", None)), \
+           unittest.mock.patch.object(aicli, "auth_status", return_value={"authenticated": True}), \
+           unittest.mock.patch.object(aicli.subprocess, "run", side_effect=fake_run):
+            res = aicli.auto_reauth(cfg, "agy")
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["auto_reauthed"])
+        prompt = captured["cmd"][captured["cmd"].index("--prompt") + 1]
+        self.assertIn("zakaria1193@gmail.com", prompt)
+        self.assertIn("Never select any other account", prompt)
+
 
 class AllowanceCliTests(unittest.TestCase):
     def test_set_and_clear_allowance_cli(self):

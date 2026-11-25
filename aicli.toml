@@ -29,6 +29,11 @@ trust_file = "~/.gemini/antigravity-cli/settings.json"
 # agy's global skills folder, where aicli keeps the skills of agy runs (as aicli-<name>).
 # Default: config/skills beside trust_file's folder (agy does not read antigravity-cli/skills).
 skills_dir = "~/.gemini/config/skills"
+# The only Google account `auto_reauth`'s google-chrome-handler helper is allowed to pick
+# at Google's account chooser. It refuses (AUTH_BLOCKED) rather than sign in as any other
+# account, and rather than enter a password/2FA/CAPTCHA itself - it only ever clicks through
+# an already-signed-in session for this one account.
+reauth_account = "zakaria1193@gmail.com"
 
 [agy.tiers]
 low = "gemini-3.8-flash-low"

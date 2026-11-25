@@ -2375,10 +2375,23 @@ def auto_reauth(config, tool, timeout=90):
             "error": f"Helper CLI {helper_tool!r} is not authenticated; skipping auto-reauth",
         }
 
+    account = (os.environ.get("AICLI_AGY_REAUTH_ACCOUNT")
+              or (config.get("agy") or {}).get("reauth_account") or "").strip()
+    if not account:
+        return {
+            "ok": False,
+            "auto_reauthed": False,
+            "auth_url": auth_url,
+            "error": "Refusing auto-reauth: no [agy] reauth_account configured, so the "
+                     "account picked at Google's chooser could not be pinned",
+        }
     prompt = (
         "Complete this already-signed-in Google OAuth consent flow for Antigravity (agy) using Claude in Chrome.\n"
         f"1. Open this exact URL in Chrome: {auth_url}\n"
-        "2. If Google shows an already-signed-in account chooser, select the account and click Continue / Allow.\n"
+        f"2. If Google shows an already-signed-in account chooser, select ONLY the account {account} "
+        "and click Continue / Allow. Never select any other account. If that account is not shown "
+        "already signed in, STOP IMMEDIATELY and output AUTH_BLOCKED instead of signing in as a "
+        "different account or adding one.\n"
         "3. STOP IMMEDIATELY and output AUTH_BLOCKED if Google asks for a password, 2FA, CAPTCHA, or security challenge.\n"
         "4. If the callback page displays an authorization code, output ONLY a single line: AUTH_CODE=<code>\n"
         "5. If sign-in completes automatically with no code to copy, output ONLY: AUTH_DONE"
