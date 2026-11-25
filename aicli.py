@@ -1220,7 +1220,47 @@ def _decode_stream(val):
 
 _AGY_AUTH_RETRY_DELAY = 2.0
 _AGY_PROBE_LOCK_TIMEOUT = 5.0   # best-effort only: never add much to a caller's own timeout
+_AGY_LAUNCH_LOCK_TIMEOUT = 5.0
+_AGY_LAUNCH_SETTLE = 4.0        # held after a real agy task starts, not for its whole run
 DEFAULT_AGY_PROBE_LOCK = DEFAULT_USAGE_LOG.with_name("agy-probe.lock")
+
+
+def _agy_file_lock_acquire(timeout):
+    """Best-effort flock acquire on the one shared agy token-file lock
+    (used both for status/usage probes and for staggering real agy task
+    launches - see _agy_probe_lock and _run_captured). Returns an fd to
+    release later with _agy_file_lock_release, or None if the lock path
+    itself could not be opened. A lock that can't be acquired within the
+    timeout is skipped rather than waited on forever, so a stuck/orphaned
+    lock file never wedges every caller."""
+    path = Path(os.environ.get("AICLI_AGY_PROBE_LOCK", DEFAULT_AGY_PROBE_LOCK)).expanduser()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        return None
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError:
+            if time.monotonic() >= deadline:
+                return fd   # proceed unlocked (flock was never granted) rather than hang
+            time.sleep(0.2)
+
+
+def _agy_file_lock_release(fd):
+    if fd is None:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
 
 
 @contextlib.contextmanager
@@ -1229,30 +1269,12 @@ def _agy_probe_lock():
     task runs - so pjm's health check, the cockpit's polling and an `aicli
     usage` call don't all read/refresh the one shared file-based OAuth token
     (AGY_CLI_FORCE_FILE_TOKEN_STORAGE) at the same instant. That race is what
-    made a transient probe blip look like a real logout. Best-effort: a lock
-    that can't be acquired within the timeout is skipped rather than waited
-    on forever, so a stuck/orphaned lock file never wedges every probe - and
-    a real agy task run is never held up behind this at all."""
-    path = Path(os.environ.get("AICLI_AGY_PROBE_LOCK", DEFAULT_AGY_PROBE_LOCK)).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    made a transient probe blip look like a real logout."""
+    fd = _agy_file_lock_acquire(_AGY_PROBE_LOCK_TIMEOUT)
     try:
-        deadline = time.monotonic() + _AGY_PROBE_LOCK_TIMEOUT
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    break   # proceed unlocked rather than hang on a stuck lock
-                time.sleep(0.2)
         yield
     finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        os.close(fd)
+        _agy_file_lock_release(fd)
 
 
 def _agy_probe_usage(bin_path, timeout):
@@ -2988,7 +3010,18 @@ def trust_cwd(tool, cwd=None, config=None):
 def _run_captured(argv, tool, model, row):
     """Run the CLI with its stdout passed through unchanged while a copy is
     kept, then log the token counts it reported (or an estimate)."""
+    launch_lock_fd = _agy_file_lock_acquire(_AGY_LAUNCH_LOCK_TIMEOUT) if tool == "agy" else None
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, env=_agy_env() if tool == "agy" else None)
+    if launch_lock_fd is not None:
+        # Stagger concurrent agy launches by a few seconds - not the whole run -
+        # so two processes don't both hit the shared file-based OAuth token
+        # (AGY_CLI_FORCE_FILE_TOKEN_STORAGE) during their own startup auth
+        # check/refresh at the same instant. Released on a timer, independent
+        # of how long this run itself takes.
+        settle = float(os.environ.get("AICLI_AGY_LAUNCH_SETTLE", _AGY_LAUNCH_SETTLE))
+        timer = threading.Timer(settle, _agy_file_lock_release, args=(launch_lock_fd,))
+        timer.daemon = True   # never block this process's own exit on the release
+        timer.start()
     old = signal.signal(signal.SIGTERM, lambda signum, frame: proc.terminate())
     kept, size = [], 0
     try:

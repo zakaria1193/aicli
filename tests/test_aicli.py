@@ -1716,6 +1716,46 @@ class AuthCliTests(unittest.TestCase):
             for (_, e1), (s2, _) in zip(intervals, intervals[1:]):
                 self.assertGreaterEqual(s2, e1)
 
+    def test_agy_task_launches_are_staggered_but_runs_still_overlap(self):
+        """Two real `aicli run` agy task processes starting at the same
+        moment (e.g. a chloejobs job and a pjm ticket) must have their
+        launches staggered by the settle window, but must NOT be serialized
+        end to end - the second one has to start before the first finishes,
+        or this would silently kill real concurrency (pjm-0051)."""
+        with tempfile.TemporaryDirectory() as d:
+            dp = Path(d)
+            run_duration = 1.0
+            events_path = dp / "events.log"
+            task_bin = dp / "agy-task"
+            task_bin.write_text(
+                "#!/bin/sh\n"
+                f'echo "start $(date +%s%N)" >> "{events_path}"\n'
+                f"sleep {run_duration}\n"
+                f'echo "end $(date +%s%N)" >> "{events_path}"\n'
+                "echo done\n"
+            )
+            task_bin.chmod(0o755)
+            config_path, _ = make_config(dp, agy={"bin": str(task_bin)})
+            env = {
+                **os.environ, "AICLI_CONFIG": str(config_path),
+                "AICLI_AGY_PROBE_LOCK": str(dp / "agy-probe.lock"),
+                "AICLI_AGY_LAUNCH_SETTLE": "0.4",
+                "AICLI_USAGE_LOG": str(dp / "usage.jsonl"),
+            }
+            cmd = [sys.executable, str(AICLI), "run", "--class", "t-agy", "--", "-p", "x"]
+            procs = [subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    for _ in range(2)]
+            for p in procs:
+                self.assertEqual(p.wait(timeout=15), 0)
+            lines = [line.split() for line in events_path.read_text().splitlines()]
+            self.assertEqual(len(lines), 4)
+            starts = sorted(int(l[1]) for l in lines if l[0] == "start")
+            ends = sorted(int(l[1]) for l in lines if l[0] == "end")
+            gap_s = (starts[1] - starts[0]) / 1e9
+            self.assertGreaterEqual(gap_s, 0.2)          # launches really staggered by ~the settle window
+            self.assertLess(gap_s, run_duration)         # far short of the full run: not serialized end to end
+            self.assertLess(starts[1], ends[0])          # the second run starts while the first is still going
+
     def test_auto_reauth_refuses_same_tool_and_falls_back_with_url(self):
         cfg = {
             "claude": {"bin": str(FAKE_CLI / "fake-claude")},
