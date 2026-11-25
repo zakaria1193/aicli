@@ -9,6 +9,8 @@ The config is `$AICLI_CONFIG`, else `~/.config/aicli/aicli.toml`, else the
 `aicli.toml` shipped next to this file (see default_config_path).
 """
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -1217,16 +1219,51 @@ def _decode_stream(val):
 
 
 _AGY_AUTH_RETRY_DELAY = 2.0
+_AGY_PROBE_LOCK_TIMEOUT = 5.0   # best-effort only: never add much to a caller's own timeout
+DEFAULT_AGY_PROBE_LOCK = DEFAULT_USAGE_LOG.with_name("agy-probe.lock")
+
+
+@contextlib.contextmanager
+def _agy_probe_lock():
+    """Serializes agy status/usage *probes* across processes - not real agy
+    task runs - so pjm's health check, the cockpit's polling and an `aicli
+    usage` call don't all read/refresh the one shared file-based OAuth token
+    (AGY_CLI_FORCE_FILE_TOKEN_STORAGE) at the same instant. That race is what
+    made a transient probe blip look like a real logout. Best-effort: a lock
+    that can't be acquired within the timeout is skipped rather than waited
+    on forever, so a stuck/orphaned lock file never wedges every probe - and
+    a real agy task run is never held up behind this at all."""
+    path = Path(os.environ.get("AICLI_AGY_PROBE_LOCK", DEFAULT_AGY_PROBE_LOCK)).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        deadline = time.monotonic() + _AGY_PROBE_LOCK_TIMEOUT
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break   # proceed unlocked rather than hang on a stuck lock
+                time.sleep(0.2)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
 
 
 def _agy_probe_usage(bin_path, timeout):
     """One `agy -p /usage` call. Returns (stdout, combined_output, returncode
     or None, timed_out)."""
     try:
-        p = subprocess.run(
-            [bin_path, "-p", "/usage"], capture_output=True, text=True,
-            stdin=subprocess.DEVNULL, timeout=timeout, check=False, env=_agy_env(),
-        )
+        with _agy_probe_lock():
+            p = subprocess.run(
+                [bin_path, "-p", "/usage"], capture_output=True, text=True,
+                stdin=subprocess.DEVNULL, timeout=timeout, check=False, env=_agy_env(),
+            )
         stdout = p.stdout or ""
         return stdout, stdout + "\n" + (p.stderr or ""), p.returncode, False
     except subprocess.TimeoutExpired as exc:

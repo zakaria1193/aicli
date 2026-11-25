@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import unittest
@@ -1677,6 +1678,43 @@ class AuthCliTests(unittest.TestCase):
                 res = aicli._agy_usage(cfg, timeout=5)
             self.assertEqual(calls_path.read_text().strip(), "2")   # one retry, not more
             self.assertEqual(res["state"], "ok")
+
+    def test_agy_probe_lock_serializes_concurrent_usage_probes(self):
+        """pjm's health check, the cockpit's poll and an `aicli usage` call must
+        not read/refresh agy's one shared file-based OAuth token at the same
+        instant - that is the race behind the flapping (chloejobs, 2026-11-25)."""
+        with tempfile.TemporaryDirectory() as d:
+            dp = Path(d)
+            lock_path = dp / "agy-probe.lock"
+            events_path = dp / "events.log"
+            slow_bin = dp / "agy-slow"
+            slow_bin.write_text(
+                "#!/bin/sh\n"
+                f'echo "start $(date +%s%N)" >> "{events_path}"\n'
+                "sleep 0.3\n"
+                f'echo "end $(date +%s%N)" >> "{events_path}"\n'
+                "printf 'Gemini Models\\tWeekly Limit Remaining\\t30%%\\t2026-10-23T22:43:51Z\\n'\n"
+                "exit 0\n"
+            )
+            slow_bin.chmod(0o755)
+            with unittest.mock.patch.dict(os.environ, {"AICLI_AGY_PROBE_LOCK": str(lock_path)}):
+                threads = [threading.Thread(target=aicli._agy_probe_usage, args=(str(slow_bin), 5))
+                          for _ in range(3)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=10)
+            lines = [line.split() for line in events_path.read_text().splitlines()]
+            self.assertEqual(len(lines), 6)   # 3 starts + 3 ends, none dropped
+            it = iter(lines)
+            intervals = []
+            for a, b in zip(it, it):
+                self.assertEqual(a[0], "start")
+                self.assertEqual(b[0], "end")   # fails if a later start snuck in first: not serialized
+                intervals.append((int(a[1]), int(b[1])))
+            intervals.sort()
+            for (_, e1), (s2, _) in zip(intervals, intervals[1:]):
+                self.assertGreaterEqual(s2, e1)
 
     def test_auto_reauth_refuses_same_tool_and_falls_back_with_url(self):
         cfg = {
