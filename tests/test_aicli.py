@@ -1648,6 +1648,36 @@ class AuthCliTests(unittest.TestCase):
                 cached = json.loads(quota_path.read_text())
                 self.assertEqual(cached["agy"]["result"]["state"], "down")
 
+    def test_agy_usage_transient_blip_recovers_on_retry_and_is_not_cached_down(self):
+        """A concurrent agy call racing on the shared file-based token store
+        (AGY_CLI_FORCE_FILE_TOKEN_STORAGE) can make one probe transiently look
+        unauthenticated even though the real session is fine. One retry must
+        confirm a real outage before it is trusted - chloejobs/pjm-0051."""
+        with tempfile.TemporaryDirectory() as d:
+            dp = Path(d)
+            quota_path = dp / "quota.json"
+            calls_path = dp / "calls"
+            flaky_bin = dp / "agy-flaky"
+            flaky_bin.write_text(
+                "#!/bin/sh\n"
+                f'n=$(cat "{calls_path}" 2>/dev/null || echo 0)\n'
+                "n=$((n + 1))\n"
+                f'echo "$n" > "{calls_path}"\n'
+                'if [ "$n" -ge 2 ]; then\n'
+                "  printf 'Gemini Models\\tWeekly Limit Remaining\\t30%%\\t2026-10-23T22:43:51Z\\n'\n"
+                "  exit 0\n"
+                "fi\n"
+                "echo 'Authentication required. Please visit the URL to log in:'\n"
+                "exit 1\n"
+            )
+            flaky_bin.chmod(0o755)
+            cfg = {"agy": {"bin": str(flaky_bin)}}
+            with unittest.mock.patch.dict(os.environ, {"AICLI_QUOTA_CACHE": str(quota_path)}), \
+                 unittest.mock.patch.object(aicli.time, "sleep"):
+                res = aicli._agy_usage(cfg, timeout=5)
+            self.assertEqual(calls_path.read_text().strip(), "2")   # one retry, not more
+            self.assertEqual(res["state"], "ok")
+
     def test_auto_reauth_refuses_same_tool_and_falls_back_with_url(self):
         cfg = {
             "claude": {"bin": str(FAKE_CLI / "fake-claude")},

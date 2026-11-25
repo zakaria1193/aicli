@@ -1216,31 +1216,55 @@ def _decode_stream(val):
     return str(val)
 
 
+_AGY_AUTH_RETRY_DELAY = 2.0
+
+
+def _agy_probe_usage(bin_path, timeout):
+    """One `agy -p /usage` call. Returns (stdout, combined_output, returncode
+    or None, timed_out)."""
+    try:
+        p = subprocess.run(
+            [bin_path, "-p", "/usage"], capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=timeout, check=False, env=_agy_env(),
+        )
+        stdout = p.stdout or ""
+        return stdout, stdout + "\n" + (p.stderr or ""), p.returncode, False
+    except subprocess.TimeoutExpired as exc:
+        stdout = _decode_stream(exc.stdout)
+        return stdout, stdout + "\n" + _decode_stream(exc.stderr), None, True
+    except OSError:
+        return "", "", None, True
+
+
+def _agy_probe_usage_confirmed(bin_path, timeout):
+    """`_agy_probe_usage`, but a reading that looks like an expired login is
+    confirmed with one retry after a short settle first. Concurrent agy
+    calls (several tickets/clients at once) race on the shared file-based
+    token store (AGY_CLI_FORCE_FILE_TOKEN_STORAGE), so one of them can
+    transiently look unauthenticated for a few seconds even though the real
+    session is fine. Only a signal that survives the retry is treated as a
+    real outage - that is what gets cached and alerted on for every other
+    agy caller, so a one-off race must not be mistaken for a logout."""
+    stdout, combined, rc, timed_out = _agy_probe_usage(bin_path, timeout)
+    if _agy_output_needs_auth(combined):
+        time.sleep(_AGY_AUTH_RETRY_DELAY)
+        stdout, combined, rc, timed_out = _agy_probe_usage(bin_path, timeout)
+    return stdout, combined, rc, timed_out
+
+
 def _agy_usage(config, timeout):
     bin_path = resolve_bin(config, "agy")
     if bin_path is None:
         return {"state": UNKNOWN, "detail": "agy CLI not found", "bars": {}}
 
-    try:
-        result = subprocess.run(
-            [bin_path, "-p", "/usage"], capture_output=True, text=True,
-            stdin=subprocess.DEVNULL, timeout=timeout, check=False, env=_agy_env(),
-        )
-    except subprocess.TimeoutExpired as exc:
-        combined = _decode_stream(exc.stdout) + "\n" + _decode_stream(exc.stderr)
-        if _agy_output_needs_auth(combined):
-            return {"state": "down", "detail": "Antigravity OAuth session expired / not logged in", "bars": {}}
-        return {"state": UNKNOWN, "detail": "agy -p /usage timed out", "bars": {}}
-    except OSError:
-        return {"state": UNKNOWN, "detail": "agy -p /usage timed out", "bars": {}}
-
-    combined = (result.stdout or "") + "\n" + (result.stderr or "")
+    stdout, combined, rc, timed_out = _agy_probe_usage_confirmed(bin_path, timeout)
     if _agy_output_needs_auth(combined):
         return {"state": "down", "detail": "Antigravity OAuth session expired / not logged in", "bars": {}}
-    if result.returncode != 0:
+    if timed_out:
+        return {"state": UNKNOWN, "detail": "agy -p /usage timed out", "bars": {}}
+    if rc != 0:
         return {"state": UNKNOWN, "detail": "agy -p /usage failed", "bars": {}}
-
-    return parse_agy_usage(result.stdout)
+    return parse_agy_usage(stdout)
 
 
 def compute_usage(config):
@@ -2053,28 +2077,17 @@ def _auth_status_one(config, t):
             return {"authenticated": False, "detail": f"Check failed: {e}"}
     if t == "agy":
         try:
-            p = subprocess.run(
-                [bin_path, "-p", "/usage"], capture_output=True, text=True,
-                stdin=subprocess.DEVNULL, timeout=12, check=False, env=_agy_env(),
-            )
-            combined = (p.stdout or "") + "\n" + (p.stderr or "")
+            stdout, combined, rc, timed_out = _agy_probe_usage_confirmed(bin_path, 12)
             if _agy_output_needs_auth(combined):
                 _cached_quota("agy", {"state": "down", "detail": "Antigravity OAuth session expired / not logged in", "bars": {}})
                 return {"authenticated": False, "detail": "Antigravity OAuth session expired / not logged in"}
-            if p.returncode == 0 and ("Limit" in p.stdout or "Quota" in p.stdout or "Gemini" in p.stdout):
+            if timed_out:
+                return {"authenticated": False, "detail": "Timed out checking agy auth (likely not signed in)"}
+            if rc == 0 and ("Limit" in stdout or "Quota" in stdout or "Gemini" in stdout):
                 return {"authenticated": True, "detail": "Authenticated"}
-            if "fake" in bin_path and p.returncode == 0:
+            if "fake" in bin_path and rc == 0:
                 return {"authenticated": True, "detail": "Authenticated"}
             return {"authenticated": False, "detail": "Not signed in or session expired"}
-        except subprocess.TimeoutExpired as exc:
-            combined = _decode_stream(exc.stdout) + "\n" + _decode_stream(exc.stderr)
-            detail = (
-                "Antigravity OAuth session expired / not logged in"
-                if _agy_output_needs_auth(combined)
-                else "Timed out checking agy auth (likely not signed in)"
-            )
-            _cached_quota("agy", {"state": "down", "detail": detail, "bars": {}})
-            return {"authenticated": False, "detail": detail}
         except Exception as e:
             return {"authenticated": False, "detail": f"Check failed: {e}"}
     return {"authenticated": False, "detail": f"Unknown tool: {t}"}
@@ -2959,10 +2972,15 @@ def _run_captured(argv, tool, model, row):
         signal.signal(signal.SIGTERM, old)
     text = b"".join(kept).decode("utf-8", errors="replace")
     if tool == "agy" and code != 0 and _agy_output_needs_auth(text):
-        _cached_quota(
-            "agy",
-            {"state": "down", "detail": "Antigravity OAuth session expired / not logged in", "bars": {}},
-        )
+        # Confirm before broadcasting: this run's own failure stands either way,
+        # but a concurrent agy call racing on the shared file-based token store
+        # must not get to mark every other agy caller "down" over one blip.
+        _, confirm_combined, _, _ = _agy_probe_usage_confirmed(argv[0], 12)
+        if _agy_output_needs_auth(confirm_combined):
+            _cached_quota(
+                "agy",
+                {"state": "down", "detail": "Antigravity OAuth session expired / not logged in", "bars": {}},
+            )
     argv_chars = sum(len(a) for a in argv[1:])
     usage, estimated = run_usage_fields(tool, model, text, argv_chars, len(text))
     _log_run(row, usage, estimated)
